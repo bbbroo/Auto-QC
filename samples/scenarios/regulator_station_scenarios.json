@@ -1,0 +1,232 @@
+[
+  {
+    "name": "good_regulator_station",
+    "description": "Complete regulator station with coordinated PFD/P&ID tags, OPP setpoint basis, vent, drain, sensing line, and revisions.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "A",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nREV: A\nPROCESS FLOW DIAGRAM\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 BYPASS RUN\nVENT BDV-101 DRAIN DRN-101\nPI-101 PT-101 PRESSURE GAUGE PRESSURE TRANSMITTER\nSENSING LINE TO DOWNSTREAM OF REGULATOR\nOPP BY MONITOR REGULATOR SETPOINT 55 psig MAOP BASIS"
+      },
+      {
+        "drawing_number": "M-101",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-101\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 BYPASS RUN\nVENT BDV-101 DRAIN DRN-101\nPI-101 PT-101 PRESSURE GAUGE PRESSURE TRANSMITTER\nSENSING LINE TO DOWNSTREAM OF REGULATOR\nOPP BY MONITOR REGULATOR SETPOINT 55 psig MAOP BASIS"
+      }
+    ],
+    "expected_findings": []
+  },
+  {
+    "name": "missing_bypass",
+    "description": "Regulator station drawings omit bypass arrangement.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "A",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nREV: A\nPROCESS FLOW DIAGRAM\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nVENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      },
+      {
+        "drawing_number": "M-101",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-101\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nVENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      }
+    ],
+    "expected_findings": [
+      { "title_contains": "Bypass arrangement" }
+    ]
+  },
+  {
+    "name": "missing_inlet_isolation",
+    "description": "No visible upstream isolation.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "A",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nREV: A\nPROCESS FLOW DIAGRAM\n4-NG-1001 FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      },
+      {
+        "drawing_number": "M-101",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-101\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      }
+    ],
+    "expected_findings": [
+      { "title_contains": "Inlet isolation" }
+    ]
+  },
+  {
+    "name": "missing_outlet_isolation",
+    "description": "No visible downstream isolation.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "A",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nREV: A\nPROCESS FLOW DIAGRAM\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      },
+      {
+        "drawing_number": "M-101",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-101\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      }
+    ],
+    "expected_findings": [
+      { "title_contains": "Outlet isolation" }
+    ]
+  },
+  {
+    "name": "unclear_overpressure_protection",
+    "description": "No relief, monitor, slam-shut, or explicit OPP method.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "A",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nREV: A\nPROCESS FLOW DIAGRAM\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE"
+      },
+      {
+        "drawing_number": "M-101",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-101\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE"
+      }
+    ],
+    "expected_findings": [
+      { "title_contains": "Overpressure protection philosophy" }
+    ]
+  },
+  {
+    "name": "mismatched_pfd_pid_tags",
+    "description": "PFD and P&ID use different inlet valve tags.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "A",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nREV: A\nPROCESS FLOW DIAGRAM\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      },
+      {
+        "drawing_number": "M-101",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-101\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 V-201 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      }
+    ],
+    "expected_findings": [
+      { "title_contains": "Valve tag appears on PFD but not P&ID" },
+      { "title_contains": "Valve tag appears on P&ID but not PFD" }
+    ]
+  },
+  {
+    "name": "missing_vent_or_drain_details",
+    "description": "Station has no visible vent or drain arrangement.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "A",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nREV: A\nPROCESS FLOW DIAGRAM\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      },
+      {
+        "drawing_number": "M-101",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-101\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      }
+    ],
+    "expected_findings": [
+      { "title_contains": "Vent or drain" }
+    ]
+  },
+  {
+    "name": "unclear_pressure_sensing_line",
+    "description": "Regulator pilot/sensing line is absent.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "A",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nREV: A\nPROCESS FLOW DIAGRAM\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 OPP SETPOINT 55 psig"
+      },
+      {
+        "drawing_number": "M-101",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-101\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 OPP SETPOINT 55 psig"
+      }
+    ],
+    "expected_findings": [
+      { "title_contains": "sensing or pilot line" }
+    ]
+  },
+  {
+    "name": "duplicate_tag",
+    "description": "Same tag repeats excessively on one sheet.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "A",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nREV: A\nPROCESS FLOW DIAGRAM\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig\nV-101 V-101 V-101"
+      },
+      {
+        "drawing_number": "M-101",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-101\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      }
+    ],
+    "expected_findings": [
+      { "title_contains": "Repeated tag" }
+    ]
+  },
+  {
+    "name": "revision_title_block_issue",
+    "description": "Missing revision and duplicated drawing number.",
+    "sheets": [
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PROCESS FLOW DIAGRAM",
+        "revision": "",
+        "sheet_type": "pfd",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PROCESS FLOW DIAGRAM\nPROCESS FLOW DIAGRAM\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      },
+      {
+        "drawing_number": "M-100",
+        "sheet_title": "PIPING AND INSTRUMENTATION DIAGRAM",
+        "revision": "A",
+        "sheet_type": "p&id",
+        "text": "DRAWING NO: M-100\nSHEET TITLE: PIPING AND INSTRUMENTATION DIAGRAM\nREV: A\nP&ID\n4-NG-1001 V-101 INLET ISOLATION FLT-101 FILTER REG-101 WORKER REGULATOR MON-101 MONITOR REGULATOR V-102 OUTLET ISOLATION 4-NG-1002\nBYPASS V-150 VENT BDV-101 DRAIN DRN-101 PI-101 PT-101 SENSING LINE OPP SETPOINT 55 psig"
+      }
+    ],
+    "expected_findings": [
+      { "title_contains": "Revision missing" },
+      { "title_contains": "Duplicate drawing number" }
+    ]
+  }
+]
