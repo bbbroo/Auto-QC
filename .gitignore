@@ -14,4 +14,4 @@ playwright-report/
 *.sqlite-shm
 *.sqlite-wal
 *.tmp
-examples/
+/examples/
