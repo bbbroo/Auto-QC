@@ -1,42 +1,87 @@
-import { useEffect, useMemo, useState } from "react";
-import type { CSSProperties, FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, CSSProperties, DragEvent, FormEvent, MouseEvent, TouchEvent, WheelEvent } from "react";
 import {
   AlertTriangle,
+  Archive,
   Check,
   ChevronLeft,
   ChevronRight,
   ClipboardCheck,
+  ClipboardPaste,
   Download,
+  ExternalLink,
   FileText,
   FolderOpen,
+  HelpCircle,
+  History,
   Loader2,
+  Maximize2,
   RefreshCw,
   Save,
   Search,
+  ShieldCheck,
+  Sparkles,
   Trash2,
   Upload,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import {
-  API_BASE_URL,
+  bulkUpdateFindings,
+  clearMarkupMemory,
   createProject,
   createSampleProject,
   deleteFinding,
+  deleteProject,
   exportProject,
+  exportProjectPackage,
+  getReadiness,
+  getAIStatus,
   getApiErrorMessage,
+  getMarkupMemorySettings,
+  getMarkupMemoryStats,
+  getManualAIPrompt,
   getProject,
+  importProjectPackage,
+  importManualAIPreview,
+  listAIImportBatches,
+  listFindingEvents,
   listFindings,
+  listPromptTemplates,
   listProjects,
   listSheets,
+  mergeFindingInto,
+  previewMarkupMemoryContext,
+  previewImportBatchRollback,
+  previewManualAIResponse,
+  recalculateFindingPlacement,
+  rebuildMarkupMemory,
   resolveAssetUrl,
+  rollbackImportBatch,
+  runAIReview,
+  saveAISettings,
+  updateMarkupMemorySettings,
   updateFinding,
 } from "./api";
 import type {
+  AIStatus,
+  AIImportBatch,
+  AIPreviewResponse,
+  BatchRollbackPreview,
   ExportResponse,
   Finding,
+  FindingEvent,
   FindingStatus,
   FindingUpdate,
+  MarkupMemoryPreview,
+  MarkupMemorySettings,
+  MarkupMemorySettingsUpdate,
+  MarkupMemoryStats,
+  PlacementSummary,
+  PromptTemplate,
   Project,
+  ReadinessResponse,
   Severity,
   Sheet,
 } from "./types";
@@ -56,11 +101,22 @@ import {
 } from "./utils";
 
 type StatusFilter = "all" | FindingStatus;
+type PlacementFilter = "all" | "located" | "page_level" | "manual";
+type LeftRailCard = "review" | "projects" | "sheets" | "findings" | "inspector" | "export" | "advanced";
 
 interface ImageSize {
   width: number;
   height: number;
 }
+
+interface OverlayBoxPercent {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+type ViewerMode = "focus" | "sheet" | "marked";
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -68,14 +124,52 @@ function App() {
   const [projectDetails, setProjectDetails] = useState<Project | null>(null);
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [events, setEvents] = useState<FindingEvent[]>([]);
+  const [aiImportBatches, setAIImportBatches] = useState<AIImportBatch[]>([]);
+  const [aiStatus, setAIStatus] = useState<AIStatus | null>(null);
+  const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
+  const [selectedPromptTemplateId, setSelectedPromptTemplateId] = useState<string | null>(null);
+  const [readiness, setReadiness] = useState<ReadinessResponse | null>(null);
+  const [markupMemorySettings, setMarkupMemorySettings] = useState<MarkupMemorySettings | null>(null);
+  const [markupMemoryStats, setMarkupMemoryStats] = useState<MarkupMemoryStats | null>(null);
+  const [markupMemoryPreview, setMarkupMemoryPreview] = useState<MarkupMemoryPreview | null>(null);
   const [selectedSheetId, setSelectedSheetId] = useState<string | null>(null);
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
+  const [lastSelectedFindingId, setLastSelectedFindingId] = useState<string | null>(null);
+  const [leftRailCard, setLeftRailCard] = useState<LeftRailCard>("projects");
+  const [leftRailCollapsed, setLeftRailCollapsed] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [loadingReview, setLoadingReview] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [creatingSample, setCreatingSample] = useState(false);
+  const [runningAIReview, setRunningAIReview] = useState(false);
+  const [generatingManualPrompt, setGeneratingManualPrompt] = useState(false);
+  const [importingManualAI, setImportingManualAI] = useState(false);
+  const [manualAIPrompt, setManualAIPrompt] = useState<string | null>(null);
+  const [manualAIPromptId, setManualAIPromptId] = useState<string | null>(null);
+  const [manualAIPromptVersion, setManualAIPromptVersion] = useState<string | null>(null);
+  const [manualAIResponse, setManualAIResponse] = useState("");
+  const [manualAICopied, setManualAICopied] = useState(false);
+  const [manualAIPreview, setManualAIPreview] = useState<AIPreviewResponse | null>(null);
+  const [previewingManualAI, setPreviewingManualAI] = useState(false);
+  const [manualAIImportMessage, setManualAIImportMessage] = useState<string | null>(null);
   const [savingFindingId, setSavingFindingId] = useState<string | null>(null);
   const [deletingFindingId, setDeletingFindingId] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [exportingPackage, setExportingPackage] = useState(false);
+  const [importingPackage, setImportingPackage] = useState(false);
+  const [rollingBackBatchId, setRollingBackBatchId] = useState<string | null>(null);
+  const [mergingFindingId, setMergingFindingId] = useState<string | null>(null);
+  const [activeMarkedPdfUrl, setActiveMarkedPdfUrl] = useState<string | null>(null);
+  const [autoAdvanceReview, setAutoAdvanceReview] = useState(true);
+  const [recalculatingPlacement, setRecalculatingPlacement] = useState(false);
+  const [placementMessage, setPlacementMessage] = useState<string | null>(null);
+  const [placementSummary, setPlacementSummary] = useState<PlacementSummary | null>(null);
+  const [loadingMarkupMemory, setLoadingMarkupMemory] = useState(false);
+  const [savingMarkupMemory, setSavingMarkupMemory] = useState(false);
+  const [rebuildingMarkupMemory, setRebuildingMarkupMemory] = useState(false);
+  const [clearingMarkupMemory, setClearingMarkupMemory] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const selectedProject =
@@ -83,6 +177,9 @@ function App() {
   const selectedSheet = sheets.find((sheet) => sheet.id === selectedSheetId) ?? null;
   const selectedFinding =
     findings.find((finding) => finding.id === selectedFindingId) ?? null;
+  const selectedProjectSourcePdfUrl = resolveAssetUrl(
+    selectedProject?.source_pdf_url ?? selectedProject?.source_pdf_path,
+  );
 
   const findingsForSelectedSheet = useMemo(() => {
     if (!selectedSheet) {
@@ -91,9 +188,21 @@ function App() {
 
     return findings.filter((finding) => findingMatchesSheet(finding, selectedSheet));
   }, [findings, selectedSheet]);
+  const reviewQueueFindings = useMemo(
+    () => findings.filter((finding) => finding.status === "needs_review"),
+    [findings],
+  );
+  const reviewProgress = {
+    total: findings.length,
+    remaining: reviewQueueFindings.length,
+    resolved: Math.max(0, findings.length - reviewQueueFindings.length),
+  };
 
   useEffect(() => {
     void refreshProjects();
+    void refreshAIStatus();
+    void refreshPromptTemplates();
+    void refreshReadiness();
   }, []);
 
   useEffect(() => {
@@ -101,13 +210,32 @@ function App() {
       setProjectDetails(null);
       setSheets([]);
       setFindings([]);
+      setEvents([]);
+      setAIImportBatches([]);
       setSelectedSheetId(null);
       setSelectedFindingId(null);
+      setManualAIImportMessage(null);
+      setManualAIPreview(null);
+      setActiveMarkedPdfUrl(null);
+      setPlacementMessage(null);
+      setPlacementSummary(null);
+      setMarkupMemoryPreview(null);
       return;
     }
 
+    setManualAIImportMessage(null);
+    setManualAIPreview(null);
+    setActiveMarkedPdfUrl(null);
+    setPlacementMessage(null);
+    setPlacementSummary(null);
     void refreshReview(selectedProjectId);
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (leftRailCard === "advanced") {
+      void refreshMarkupMemory();
+    }
+  }, [leftRailCard, selectedProjectId]);
 
   useEffect(() => {
     if (!selectedFinding) {
@@ -115,10 +243,164 @@ function App() {
     }
 
     const sheet = getFindingSheet(selectedFinding, sheets);
-    if (sheet && sheet.id !== selectedSheetId) {
-      setSelectedSheetId(sheet.id);
+    if (sheet) {
+      setSelectedSheetId((current) => (current === sheet.id ? current : sheet.id));
     }
-  }, [selectedFinding, selectedSheetId, sheets]);
+  }, [selectedFinding?.id, sheets]);
+
+  async function refreshAIStatus() {
+    try {
+      setAIStatus(await getAIStatus());
+    } catch {
+      setAIStatus(null);
+    }
+  }
+
+  async function promptForAIReviewSettings(): Promise<boolean> {
+    const product = window.prompt(
+      "AI product for Deep Review. Enter OpenAI or DeepSeek.",
+      formatAIProvider(aiStatus?.provider),
+    );
+    if (product === null) {
+      return false;
+    }
+    const provider = normalizeAIProvider(product);
+    if (!provider) {
+      setError("Choose OpenAI or DeepSeek before running AI Deep Review.");
+      return false;
+    }
+
+    const model = window.prompt(
+      `Model to use for ${formatAIProvider(provider)} AI Deep Review. Recommended strong models: ${strongAIModelExamples(provider)}.`,
+      aiStatus?.provider === provider ? aiStatus?.model || defaultAIModelForProvider(provider) : defaultAIModelForProvider(provider),
+    );
+    if (model === null) {
+      return false;
+    }
+    if (!model.trim()) {
+      setError("Enter a model before running AI Deep Review.");
+      return false;
+    }
+
+    const keyMessage = aiStatus?.api_key_saved && aiStatus.provider === provider
+      ? `Saved ${formatAIProvider(provider)} key found. Leave blank to keep ${aiStatus.api_key_hint || "the saved key"}.`
+      : `${formatAIProvider(provider)} key for AI Deep Review. Saved for this OS user only.`;
+    const apiKey = window.prompt(keyMessage, "");
+    if (apiKey === null) {
+      return false;
+    }
+    if (!apiKey.trim() && !(aiStatus?.api_key_saved && aiStatus.provider === provider)) {
+      setError(`Enter a ${formatAIProvider(provider)} key before running AI Deep Review.`);
+      return false;
+    }
+
+    const savedStatus = await saveAISettings({
+      api_key: apiKey.trim(),
+      model: model.trim(),
+      provider,
+    });
+    setAIStatus(savedStatus);
+    return true;
+  }
+
+  async function refreshPromptTemplates() {
+    try {
+      const templates = await listPromptTemplates();
+      setPromptTemplates(templates);
+      setSelectedPromptTemplateId((current) => current ?? templates[0]?.id ?? null);
+    } catch {
+      setPromptTemplates([]);
+    }
+  }
+
+  async function refreshReadiness() {
+    try {
+      setReadiness(await getReadiness());
+    } catch {
+      setReadiness(null);
+    }
+  }
+
+  async function refreshMarkupMemory(projectId = selectedProjectId) {
+    setLoadingMarkupMemory(true);
+    try {
+      const [settings, stats, preview] = await Promise.all([
+        getMarkupMemorySettings(),
+        getMarkupMemoryStats(),
+        projectId ? previewMarkupMemoryContext(projectId) : Promise.resolve(null),
+      ]);
+      setMarkupMemorySettings(settings);
+      setMarkupMemoryStats(stats);
+      setMarkupMemoryPreview(preview);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setLoadingMarkupMemory(false);
+    }
+  }
+
+  async function handleUpdateMarkupMemorySettings(update: MarkupMemorySettingsUpdate) {
+    setSavingMarkupMemory(true);
+    setError(null);
+    try {
+      const settings = await updateMarkupMemorySettings(update);
+      setMarkupMemorySettings(settings);
+      setMarkupMemoryStats(await getMarkupMemoryStats());
+      if (selectedProjectId) {
+        setMarkupMemoryPreview(await previewMarkupMemoryContext(selectedProjectId));
+      }
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setSavingMarkupMemory(false);
+    }
+  }
+
+  async function handleRebuildMarkupMemory() {
+    if (rebuildingMarkupMemory) {
+      return;
+    }
+    setRebuildingMarkupMemory(true);
+    setError(null);
+    try {
+      const result = await rebuildMarkupMemory();
+      setMarkupMemoryStats(result.stats);
+      if (selectedProjectId) {
+        setMarkupMemoryPreview(await previewMarkupMemoryContext(selectedProjectId));
+      }
+      setManualAIImportMessage(`Markup Memory rebuilt from ${result.memory_examples_upserted} historical outcome${result.memory_examples_upserted === 1 ? "" : "s"}.`);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setRebuildingMarkupMemory(false);
+    }
+  }
+
+  async function handleClearMarkupMemory() {
+    if (clearingMarkupMemory) {
+      return;
+    }
+    const confirmed = window.confirm("Clear Markup Memory? This removes learned local examples but does not delete projects, findings, or exports.");
+    if (!confirmed) {
+      return;
+    }
+    setClearingMarkupMemory(true);
+    setError(null);
+    try {
+      const result = await clearMarkupMemory();
+      setMarkupMemoryStats(result.stats);
+      if (selectedProjectId) {
+        setMarkupMemoryPreview(await previewMarkupMemoryContext(selectedProjectId));
+      } else {
+        setMarkupMemoryPreview(null);
+      }
+      setManualAIImportMessage(`Cleared ${result.deleted} Markup Memory example${result.deleted === 1 ? "" : "s"}.`);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setClearingMarkupMemory(false);
+    }
+  }
 
   async function refreshProjects() {
     setLoadingProjects(true);
@@ -150,15 +432,19 @@ function App() {
     setError(null);
 
     try {
-      const [project, nextSheets, nextFindings] = await Promise.all([
+      const [project, nextSheets, nextFindings, nextEvents, nextBatches] = await Promise.all([
         getProject(projectId),
         listSheets(projectId),
         listFindings(projectId),
+        listFindingEvents(projectId),
+        listAIImportBatches(projectId),
       ]);
 
       setProjectDetails(project);
       setSheets(nextSheets);
       setFindings(nextFindings);
+      setEvents(nextEvents);
+      setAIImportBatches(nextBatches);
       setSelectedSheetId((current) => {
         if (current && nextSheets.some((sheet) => sheet.id === current)) {
           return current;
@@ -184,6 +470,8 @@ function App() {
   async function handleUpload(name: string, file: File) {
     setUploading(true);
     setError(null);
+    setManualAIImportMessage(null);
+    setManualAIPreview(null);
 
     try {
       const project = await createProject(name, file);
@@ -200,6 +488,8 @@ function App() {
   async function handleSampleProject() {
     setCreatingSample(true);
     setError(null);
+    setManualAIImportMessage(null);
+    setManualAIPreview(null);
 
     try {
       const project = await createSampleProject();
@@ -213,20 +503,377 @@ function App() {
     }
   }
 
+  async function handleDeleteProject(project: Project) {
+    if (deletingProjectId) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete "${project.name}"? This removes the uploaded package, extracted sheets, AI findings, import history, exports, and stored files.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingProjectId(project.id);
+    setError(null);
+
+    try {
+      await deleteProject(project.id);
+      const nextProjects = projects.filter((candidate) => candidate.id !== project.id);
+      setProjects(nextProjects);
+      if (selectedProjectId === project.id) {
+        setSelectedProjectId(nextProjects[0]?.id ?? null);
+      }
+      await refreshProjects();
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setDeletingProjectId(null);
+    }
+  }
+
+  async function handleExportProjectPackage() {
+    if (!selectedProjectId || exportingPackage) {
+      return;
+    }
+    setExportingPackage(true);
+    setError(null);
+    try {
+      const result = await exportProjectPackage(selectedProjectId);
+      const url = resolveAssetUrl(result.download_url) ?? result.download_url;
+      window.open(url, "_blank", "noopener,noreferrer");
+      setManualAIImportMessage(`Project package exported: ${result.filename}`);
+      await refreshReview(selectedProjectId);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setExportingPackage(false);
+    }
+  }
+
+  async function handleImportProjectPackage(file: File | null) {
+    if (!file || importingPackage) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "Import this AutoQC project package? If the original project already exists, AutoQC will restore it with new IDs instead of overwriting it.",
+    );
+    if (!confirmed) {
+      return;
+    }
+    setImportingPackage(true);
+    setError(null);
+    try {
+      const result = await importProjectPackage(file);
+      setSelectedProjectId(result.restored_project_id);
+      setManualAIImportMessage(
+        result.remapped_ids
+          ? "Project package imported with remapped IDs to avoid overwriting an existing project."
+          : "Project package imported.",
+      );
+      await refreshProjects();
+      await refreshReview(result.restored_project_id);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setImportingPackage(false);
+    }
+  }
+
+  async function handleRunAIReview() {
+    if (!selectedProjectId || runningAIReview) {
+      return;
+    }
+    setError(null);
+    try {
+      const settingsReady = await promptForAIReviewSettings();
+      if (!settingsReady) {
+        return;
+      }
+      setRunningAIReview(true);
+      const result = await runAIReview(selectedProjectId);
+      setProjectDetails(result.project);
+      setFindings(result.findings);
+      setSelectedFindingId(result.findings[0]?.id ?? null);
+      await refreshReview(selectedProjectId);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setRunningAIReview(false);
+    }
+  }
+
+  async function handleGenerateManualAIPrompt() {
+    if (!selectedProjectId || generatingManualPrompt) {
+      return;
+    }
+    setGeneratingManualPrompt(true);
+    setManualAICopied(false);
+    setError(null);
+    setManualAIImportMessage(null);
+    setManualAIPreview(null);
+    try {
+      const result = await getManualAIPrompt(selectedProjectId, selectedPromptTemplateId);
+      if (!result.prompt?.trim()) {
+        throw new Error("Manual AI prompt response was empty. Refresh the project and try again.");
+      }
+      setManualAIPrompt(result.prompt);
+      setManualAIPromptId(result.prompt_id ?? null);
+      setManualAIPromptVersion(result.prompt_version ?? null);
+      setManualAIResponse("");
+      setLeftRailCard("review");
+      try {
+        await navigator.clipboard.writeText(result.prompt);
+        setManualAICopied(true);
+        setManualAIImportMessage("Prompt copied. Open ChatGPT or Copilot, attach the PDF, and paste/run the prompt.");
+      } catch {
+        setManualAICopied(false);
+      }
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setGeneratingManualPrompt(false);
+    }
+  }
+
+  async function handleCopyManualAIPrompt() {
+    if (!manualAIPrompt) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(manualAIPrompt);
+      setManualAICopied(true);
+    } catch {
+      setManualAICopied(false);
+    }
+  }
+
+  async function handleOpenManualAI(target: "chatgpt" | "copilot") {
+    if (manualAIPrompt) {
+      try {
+        await navigator.clipboard.writeText(manualAIPrompt);
+        setManualAICopied(true);
+      } catch {
+        setManualAICopied(false);
+      }
+    }
+
+    const url = target === "chatgpt" ? "https://chatgpt.com/" : "https://copilot.microsoft.com/";
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async function handlePasteManualAIResponse() {
+    try {
+      const text = await navigator.clipboard.readText();
+      setManualAIResponse(text);
+      setManualAIPreview(null);
+      setManualAIImportMessage(text.trim() ? "Pasted AI response from clipboard." : "Clipboard was empty.");
+    } catch {
+      setError("Could not read from clipboard. Paste the AI JSON manually or import a .json/.txt file.");
+    }
+  }
+
+  async function handleManualAIResponseFile(file: File | null) {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      setManualAIResponse(text);
+      setManualAIPreview(null);
+      setManualAIImportMessage(`Loaded AI response from ${file.name}.`);
+    } catch {
+      setError(`Could not read ${file.name}. Paste the AI JSON manually instead.`);
+    }
+  }
+
+  function handleManualAIDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    void handleManualAIResponseFile(event.dataTransfer.files?.[0] ?? null);
+  }
+
+  function handleManualAIFileInput(event: ChangeEvent<HTMLInputElement>) {
+    void handleManualAIResponseFile(event.target.files?.[0] ?? null);
+    event.target.value = "";
+  }
+
+  async function handlePreviewManualAIResponse() {
+    if (!selectedProjectId || !manualAIResponse.trim() || previewingManualAI) {
+      return;
+    }
+    setPreviewingManualAI(true);
+    setError(null);
+    setManualAIImportMessage(null);
+    try {
+      const preview = await previewManualAIResponse(
+        selectedProjectId,
+        manualAIResponse,
+        manualAIPromptVersion,
+        manualAIPromptId,
+      );
+      setManualAIPreview(preview);
+      setManualAIImportMessage(
+        `Preview found ${preview.valid_recoverable_updates} valid AI update${preview.valid_recoverable_updates === 1 ? "" : "s"} (${preview.skipped_updates} skipped).`,
+      );
+      setAIImportBatches(await listAIImportBatches(selectedProjectId));
+    } catch (requestError) {
+      setManualAIPreview(null);
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setPreviewingManualAI(false);
+    }
+  }
+
+  async function handleImportManualAIResponse() {
+    if (!selectedProjectId || importingManualAI) {
+      return;
+    }
+    setImportingManualAI(true);
+    setError(null);
+    setManualAIImportMessage(null);
+    try {
+      const preview =
+        manualAIPreview ??
+        (manualAIResponse.trim()
+          ? await previewManualAIResponse(
+              selectedProjectId,
+              manualAIResponse,
+              manualAIPromptVersion,
+              manualAIPromptId,
+            )
+          : null);
+      if (!preview || preview.valid_recoverable_updates === 0) {
+        throw new Error("Preview AI Updates before importing. The preview must include at least one valid update.");
+      }
+      const result = await importManualAIPreview(selectedProjectId, preview.batch_id);
+      const importedFindingIds = new Set(result.imported_finding_ids ?? []);
+      const importedStableIds = new Set(result.imported_stable_ids ?? []);
+      const aiFinding =
+        result.findings.find((finding) => importedFindingIds.has(finding.id)) ??
+        result.findings.find((finding) => importedStableIds.has(finding.stable_id ?? "")) ??
+        [...result.findings].reverse().find((finding) => finding.source === "ai");
+      setProjectDetails(result.project);
+      setFindings(result.findings);
+      setPlacementSummary(computePlacementSummary(result.findings));
+      setSelectedFindingId(aiFinding?.id ?? result.findings[0]?.id ?? null);
+      const findingSheet = aiFinding ? getFindingSheet(aiFinding, sheets) : null;
+      if (findingSheet) {
+        setSelectedSheetId(findingSheet.id);
+      }
+      const importedCount = result.ai_updates_imported ?? result.ai_findings_created;
+      const skippedCount = Math.max(0, result.raw_ai_count - importedCount);
+      setManualAIImportMessage(
+        `Imported ${importedCount} AI update${importedCount === 1 ? "" : "s"}${skippedCount ? ` (${skippedCount} skipped)` : ""}.`,
+      );
+      setManualAIResponse("");
+      setManualAIPrompt(null);
+      setManualAIPromptId(null);
+      setManualAIPromptVersion(null);
+      setManualAIPreview(null);
+      await refreshReview(selectedProjectId);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setImportingManualAI(false);
+    }
+  }
+
+  async function handleRollbackImportBatch(batch: AIImportBatch) {
+    if (!selectedProjectId || rollingBackBatchId) {
+      return;
+    }
+    setRollingBackBatchId(batch.id);
+    setError(null);
+    try {
+      const preview = await previewImportBatchRollback(selectedProjectId, batch.id);
+      const removeCount = preview.findings_to_remove ?? 0;
+      const reviewedCount = preview.reviewed_or_edited_findings ?? 0;
+      const confirmed = window.confirm(
+        `Remove imported batch?\n\n${removeCount} finding${removeCount === 1 ? "" : "s"} created by this batch will be removed.\n${reviewedCount} accepted, edited, or reviewer-noted finding${reviewedCount === 1 ? "" : "s"} will be affected.\n\nUnrelated findings and updated pre-existing findings will not be deleted.`,
+      );
+      if (!confirmed) {
+        return;
+      }
+      const result: BatchRollbackPreview = await rollbackImportBatch(selectedProjectId, batch.id);
+      setFindings(result.findings ?? []);
+      setSelectedFindingId(result.findings?.[0]?.id ?? null);
+      setManualAIImportMessage(
+        `Rolled back import batch and removed ${result.findings_removed ?? 0} finding${result.findings_removed === 1 ? "" : "s"}.`,
+      );
+      await refreshReview(selectedProjectId);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setRollingBackBatchId(null);
+    }
+  }
+
   async function handlePatchFinding(findingId: string, update: FindingUpdate) {
     setSavingFindingId(findingId);
     setError(null);
 
     try {
       const updated = await updateFinding(findingId, update);
-      setFindings((current) =>
-        current.map((finding) => (finding.id === updated.id ? updated : finding)),
-      );
-      setSelectedFindingId(updated.id);
+      setFindings((current) => {
+        const nextFindings = current.map((finding) => (finding.id === updated.id ? updated : finding));
+        if (autoAdvanceReview && update.status && update.status !== "needs_review") {
+          const nextReview = nextUnreviewedFinding(nextFindings, updated.id);
+          setSelectedFindingId(nextReview?.id ?? updated.id);
+          if (nextReview) {
+            const sheet = getFindingSheet(nextReview, sheets);
+            if (sheet) {
+              setSelectedSheetId(sheet.id);
+            }
+          }
+        } else {
+          setSelectedFindingId(updated.id);
+        }
+        return nextFindings;
+      });
     } catch (requestError) {
       setError(getApiErrorMessage(requestError));
     } finally {
       setSavingFindingId(null);
+    }
+  }
+
+  async function handleBulkPatchFindings(targetFindings: Finding[], update: FindingUpdate) {
+    if (targetFindings.length === 0) {
+      return;
+    }
+
+    setError(null);
+    try {
+      const response = await bulkUpdateFindings(targetFindings.map((finding) => finding.id), update);
+      const updatedById = new Map(response.updated.map((finding) => [finding.id, finding]));
+      setFindings((current) => current.map((finding) => updatedById.get(finding.id) ?? finding));
+      if (selectedProjectId) {
+        setEvents(await listFindingEvents(selectedProjectId));
+      }
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    }
+  }
+
+  async function handleRecalculatePlacement() {
+    if (!selectedProjectId) {
+      return;
+    }
+
+    setRecalculatingPlacement(true);
+    setPlacementMessage(null);
+    setError(null);
+    try {
+      const result = await recalculateFindingPlacement(selectedProjectId);
+      setFindings(result.findings);
+      setPlacementSummary(result.summary);
+      setPlacementMessage(`Recalculated locations for ${result.updated_count} finding${result.updated_count === 1 ? "" : "s"}.`);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setRecalculatingPlacement(false);
     }
   }
 
@@ -244,6 +891,9 @@ function App() {
       const remaining = findings.filter((item) => item.id !== finding.id);
       setFindings(remaining);
       setSelectedFindingId(remaining[0]?.id ?? null);
+      if (selectedProjectId) {
+        setEvents(await listFindingEvents(selectedProjectId));
+      }
     } catch (requestError) {
       setError(getApiErrorMessage(requestError));
     } finally {
@@ -251,12 +901,56 @@ function App() {
     }
   }
 
+  async function handleMergeFinding(finding: Finding, targetFindingId: string) {
+    if (!selectedProjectId || mergingFindingId || !targetFindingId || targetFindingId === finding.id) {
+      return;
+    }
+    const target = findings.find((item) => item.id === targetFindingId);
+    const confirmed = window.confirm(
+      `Merge "${finding.title}" into "${target?.title ?? "selected finding"}"? The source finding will be marked duplicate and hidden from accepted-only exports.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setMergingFindingId(finding.id);
+    setError(null);
+    try {
+      await mergeFindingInto(finding.id, targetFindingId);
+      setManualAIImportMessage("Duplicate finding merged and preserved in the audit trail.");
+      await refreshReview(selectedProjectId);
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError));
+    } finally {
+      setMergingFindingId(null);
+    }
+  }
+
   function handleSelectFinding(finding: Finding) {
     setSelectedFindingId(finding.id);
+    setLastSelectedFindingId(finding.id);
+    setLeftRailCard("inspector");
+    setLeftRailCollapsed(false);
     const sheet = getFindingSheet(finding, sheets);
     if (sheet) {
       setSelectedSheetId(sheet.id);
     }
+  }
+
+  function handleSelectPdfMarkup(finding: Finding) {
+    setSelectedFindingId(finding.id);
+    setLastSelectedFindingId(finding.id);
+    setLeftRailCard("inspector");
+    setLeftRailCollapsed(false);
+    const sheet = getFindingSheet(finding, sheets);
+    if (sheet) {
+      setSelectedSheetId(sheet.id);
+    }
+  }
+
+  function handleSelectSheet(sheetId: string) {
+    setSelectedFindingId(null);
+    setActiveMarkedPdfUrl(null);
+    setSelectedSheetId(sheetId);
   }
 
   function handleStepSheet(delta: number) {
@@ -267,70 +961,551 @@ function App() {
     const index = sheets.findIndex((sheet) => sheet.id === selectedSheet.id);
     const next = sheets[index + delta];
     if (next) {
-      setSelectedSheetId(next.id);
+      handleSelectSheet(next.id);
     }
   }
 
-  return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark">
-            <ClipboardCheck size={22} />
-          </div>
-          <div>
-            <strong>AutoQC</strong>
-            <span>Natural Gas Engineering Copilot</span>
-          </div>
-        </div>
+  function handleStepFinding(delta: number, queueOnly = false) {
+    const source = queueOnly ? reviewQueueFindings : findings;
+    if (source.length === 0) {
+      return;
+    }
 
-        <div className="topbar-actions">
-          <span className="api-chip">{API_BASE_URL}</span>
+    const currentIndex = Math.max(0, source.findIndex((finding) => finding.id === selectedFindingId));
+    const next = source[clamp(currentIndex + delta, 0, source.length - 1)];
+    if (next) {
+      handleSelectFinding(next);
+    }
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName?.toLowerCase();
+      if (tagName === "input" || tagName === "textarea" || tagName === "select" || target?.isContentEditable) {
+        return;
+      }
+
+      if (event.key === "a" && selectedFinding) {
+        event.preventDefault();
+        void handlePatchFinding(selectedFinding.id, { status: "accepted" });
+      } else if (event.key === "x" && selectedFinding) {
+        event.preventDefault();
+        void handlePatchFinding(selectedFinding.id, { status: "rejected" });
+      } else if (event.key === "r" && selectedFinding) {
+        event.preventDefault();
+        void handlePatchFinding(selectedFinding.id, { status: "needs_review" });
+      } else if (event.key === "j") {
+        event.preventDefault();
+        handleStepFinding(1);
+      } else if (event.key === "k") {
+        event.preventDefault();
+        handleStepFinding(-1);
+      } else if (event.key === "n") {
+        event.preventDefault();
+        handleStepFinding(1, true);
+      } else if (event.key === "]") {
+        event.preventDefault();
+        handleStepSheet(1);
+      } else if (event.key === "[") {
+        event.preventDefault();
+        handleStepSheet(-1);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedFinding, selectedFindingId, findings, reviewQueueFindings, selectedSheet, sheets, autoAdvanceReview]);
+
+  const leftRailPanelTitle =
+    leftRailCard === "projects"
+      ? "Home"
+      : leftRailCard === "sheets"
+        ? "Sheets"
+        : leftRailCard === "review"
+          ? "Review"
+          : leftRailCard === "findings"
+            ? "Findings"
+            : leftRailCard === "inspector"
+              ? "Inspect"
+              : leftRailCard === "export"
+                ? "Export"
+                : "Advanced";
+  const leftRailPanelSubtitle =
+    leftRailCard === "projects"
+      ? `${projects.length} projects`
+      : leftRailCard === "sheets"
+        ? `${sheets.length} sheets`
+        : leftRailCard === "findings"
+          ? `${findings.length} findings`
+          : leftRailCard === "inspector"
+            ? selectedFinding
+              ? "Selected finding details"
+              : "No finding selected"
+            : leftRailCard === "export"
+              ? "Marked PDF and logs"
+              : leftRailCard === "advanced"
+                ? "Experimental tools"
+                : "AI prompt bridge";
+
+  function openLeftRailCard(card: LeftRailCard) {
+    setLeftRailCard(card);
+    setLeftRailCollapsed(false);
+  }
+
+  return (
+    <div className={`app-shell document-app ${leftRailCollapsed ? "left-rail-collapsed" : ""}`}>
+      <aside className="app-nav" aria-label="Primary navigation">
+        <button
+          className="app-logo"
+          type="button"
+          title="Go to review library"
+          aria-label="Go to review library"
+          onClick={() => openLeftRailCard("projects")}
+        >
+          <ClipboardCheck size={18} />
+        </button>
+        <nav className="nav-stack" role="tablist" aria-label="Primary workflow panels">
           <button
-            className="icon-button"
+            className={`nav-item ${leftRailCard === "projects" && !leftRailCollapsed ? "active" : ""}`}
             type="button"
-            onClick={() => {
-              void refreshProjects();
-              void refreshReview();
-            }}
-            title="Refresh"
-            aria-label="Refresh"
+            role="tab"
+            aria-selected={leftRailCard === "projects" && !leftRailCollapsed}
+            title="Go to the review library and upload area"
+            aria-label="Projects"
+            onClick={() => openLeftRailCard("projects")}
           >
-            <RefreshCw size={18} className={loadingProjects || loadingReview ? "spin" : ""} />
+            <FolderOpen size={17} />
+            <span>Projects</span>
           </button>
+          <button
+            className={`nav-item ${leftRailCard === "sheets" && !leftRailCollapsed ? "active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={leftRailCard === "sheets" && !leftRailCollapsed}
+            title="Go to the sheet package index"
+            aria-label="Sheets"
+            onClick={() => openLeftRailCard("sheets")}
+          >
+            <FileText size={17} />
+            <span>Sheets</span>
+          </button>
+          <button
+            className={`nav-item ${leftRailCard === "review" && !leftRailCollapsed ? "active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={leftRailCard === "review" && !leftRailCollapsed}
+            title="Go to the AI review bridge and import history"
+            aria-label="Review"
+            onClick={() => openLeftRailCard("review")}
+          >
+            <Sparkles size={17} />
+            <span>Review</span>
+          </button>
+          <button
+            className={`nav-item ${leftRailCard === "findings" && !leftRailCollapsed ? "active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={leftRailCard === "findings" && !leftRailCollapsed}
+            title="Open the findings list"
+            aria-label="Findings"
+            onClick={() => openLeftRailCard("findings")}
+          >
+            <Search size={17} />
+            <span>Findings</span>
+          </button>
+          <button
+            className={`nav-item ${leftRailCard === "inspector" && !leftRailCollapsed ? "active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={leftRailCard === "inspector" && !leftRailCollapsed}
+            title="Open the selected finding inspector"
+            aria-label="Inspector"
+            onClick={() => openLeftRailCard("inspector")}
+          >
+            <ClipboardCheck size={17} />
+            <span>Inspect</span>
+          </button>
+          <button
+            className={`nav-item ${leftRailCard === "export" && !leftRailCollapsed ? "active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={leftRailCard === "export" && !leftRailCollapsed}
+            title="Export marked PDF and logs"
+            aria-label="Export"
+            onClick={() => openLeftRailCard("export")}
+          >
+            <Download size={17} />
+            <span>Export</span>
+          </button>
+          <button
+            className={`nav-item ${leftRailCard === "advanced" && !leftRailCollapsed ? "active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={leftRailCard === "advanced" && !leftRailCollapsed}
+            title="Open Advanced Features"
+            aria-label="Advanced Features"
+            onClick={() => openLeftRailCard("advanced")}
+          >
+            <ShieldCheck size={17} />
+            <span>Advanced</span>
+          </button>
+          <button
+            className="nav-item"
+            type="button"
+            title="Open AutoQC workflow help"
+            aria-label="Open AutoQC help"
+            onClick={() => setHelpOpen(true)}
+          >
+            <HelpCircle size={17} />
+            <span>Help</span>
+          </button>
+        </nav>
+        <div className="usage-widget">
+          <strong>{projects.length}</strong>
+          <span>projects</span>
         </div>
-      </header>
+      </aside>
 
       {error ? (
-        <div className="system-banner" role="alert">
-          <AlertTriangle size={18} />
+        <div className="global-status-banner" role="alert" aria-live="assertive">
+          <AlertTriangle size={17} />
           <span>{error}</span>
+          <button type="button" onClick={() => setError(null)} aria-label="Dismiss error">
+            <X size={15} />
+          </button>
         </div>
       ) : null}
 
+      {helpOpen ? <HelpDialog onClose={() => setHelpOpen(false)} /> : null}
+
+      <section className={`library-pane tabbed-rail ${leftRailCollapsed ? "collapsed" : ""}`} id="review-library">
+        <div className="rail-pane-header">
+          <div>
+            <strong>{leftRailPanelTitle}</strong>
+            <span>{leftRailPanelSubtitle}</span>
+          </div>
+          <button
+            className="rail-collapse-button"
+            type="button"
+            title="Collapse left panel"
+            aria-label="Collapse left panel"
+            onClick={() => setLeftRailCollapsed(true)}
+          >
+            <ChevronLeft size={16} />
+          </button>
+        </div>
+        <div className="rail-card-scroll left-card-scroll">
+          {leftRailCard === "review" ? (
+            <section className="panel dashboard-card review-actions-card" aria-label="Review actions and AI bridge">
+              <div className="library-topbar">
+                <div>
+                  <strong>AutoQC</strong>
+                  <span>{sheets.length || projects.length} results from drawing reviews</span>
+                </div>
+                <div className="topbar-button-row">
+                  <button
+                    className="ai-action"
+                    type="button"
+                    disabled={!selectedProjectId || runningAIReview}
+                    title="Choose OpenAI or DeepSeek, confirm the local key and model, then run AI Deep Review"
+                    onClick={() => void handleRunAIReview()}
+                  >
+                    <Sparkles size={14} className={runningAIReview ? "spin" : ""} />
+                    {runningAIReview ? "AI reviewing" : "AI Deep Review"}
+                  </button>
+                  <button
+                    className="ai-action manual-ai-action"
+                    type="button"
+                    disabled={!selectedProjectId || generatingManualPrompt}
+                    title="Generate a full prompt to copy into ChatGPT or Copilot Chat, then paste the JSON response back into AutoQC"
+                    onClick={() => void handleGenerateManualAIPrompt()}
+                  >
+                    <Sparkles size={14} className={generatingManualPrompt ? "spin" : ""} />
+                    {generatingManualPrompt ? "Building prompt" : "Chat Prompt"}
+                  </button>
+                  <button
+                    className="blue-action"
+                    type="button"
+                    title="Refresh projects, sheets, findings, and audit activity from the backend"
+                    onClick={() => {
+                      void refreshProjects();
+                      void refreshReview();
+                      void refreshAIStatus();
+                    }}
+                  >
+                    <RefreshCw size={14} className={loadingProjects || loadingReview ? "spin" : ""} />
+                    Sync
+                  </button>
+                </div>
+              </div>
+
+              <DashboardSummary
+                project={selectedProject}
+                findings={findings}
+                batches={aiImportBatches}
+                events={events}
+                placementSummary={placementSummary ?? computePlacementSummary(findings)}
+              />
+
+              <div className="template-manager compact-section" aria-label="Prompt template manager">
+                <label className="field-label">
+                  Prompt template
+                  <select
+                    value={selectedPromptTemplateId ?? ""}
+                    onChange={(event) => setSelectedPromptTemplateId(event.target.value || null)}
+                    title="Choose the company-ready prompt template used for the next Chat Prompt"
+                  >
+                    {promptTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <small>
+                  {promptTemplates.find((template) => template.id === selectedPromptTemplateId)?.version ?? "Templates are stored locally."}
+                </small>
+              </div>
+
+              {manualAIImportMessage ? (
+                <div className="system-banner success-banner" role="status">
+                  <Check size={16} />
+                  <span>{manualAIImportMessage}</span>
+                </div>
+              ) : null}
+
+              {manualAIPrompt !== null ? (
+                <section className="manual-ai-panel manual-bridge-pro" aria-label="Manual ChatGPT or Copilot AI review bridge">
+                  <div className="manual-ai-header">
+                    <div>
+                      <strong>Manual Bridge Pro</strong>
+                      <span>AutoQC guides the no-API workflow: copy/open ChatGPT or Copilot, attach the same PDF, then paste or drop the JSON response for validation and import.</span>
+                    </div>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      title="Close the manual AI bridge panel"
+                      onClick={() => {
+                        setManualAIPrompt(null);
+                        setManualAIPromptId(null);
+                        setManualAIPromptVersion(null);
+                        setManualAIResponse("");
+                        setManualAIPreview(null);
+                      }}
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <div className="manual-bridge-checklist" aria-label="Manual bridge progress checklist">
+                    <span className={manualAIPrompt ? "done" : ""}><Check size={13} /> Prompt generated</span>
+                    <span className={manualAICopied ? "done" : ""}><Check size={13} /> Prompt copied</span>
+                    <span><Upload size={13} /> Attach PDF in ChatGPT/Copilot</span>
+                    <span className={manualAIResponse.trim() ? "done" : ""}><Check size={13} /> JSON response loaded</span>
+                    <span className={manualAIPreview?.valid_recoverable_updates ? "done" : ""}><Check size={13} /> Preview valid</span>
+                  </div>
+
+                  <div className="button-row manual-ai-buttons manual-launch-buttons">
+                    <button className="primary-button" type="button" onClick={() => void handleOpenManualAI("chatgpt")} title="Copy the prompt and open ChatGPT in a new tab">
+                      <ExternalLink size={16} />
+                      Open ChatGPT
+                    </button>
+                    <button className="primary-button" type="button" onClick={() => void handleOpenManualAI("copilot")} title="Copy the prompt and open Copilot in a new tab">
+                      <ExternalLink size={16} />
+                      Open Copilot
+                    </button>
+                    <button className="secondary-button" type="button" onClick={() => void handleCopyManualAIPrompt()} title="Copy the generated prompt to your clipboard">
+                      <ClipboardCheck size={16} />
+                      {manualAICopied ? "Prompt Copied" : "Copy Prompt"}
+                    </button>
+                    <a
+                      className="secondary-button inline-download-button"
+                      href={`data:text/plain;charset=utf-8,${encodeURIComponent(manualAIPrompt)}`}
+                      download={`autoqc-chat-prompt-${manualAIPromptId ?? "latest"}.txt`}
+                      title="Download the generated prompt as a text file"
+                    >
+                      <Download size={16} />
+                      Download Prompt
+                    </a>
+                    {selectedProjectSourcePdfUrl ? (
+                      <a className="secondary-button source-pdf-button" href={selectedProjectSourcePdfUrl} target="_blank" rel="noreferrer" title="Open the source PDF to attach in ChatGPT or Copilot">
+                        <FileText size={16} />
+                        Open Source PDF
+                      </a>
+                    ) : null}
+                  </div>
+
+                  <label className="field-label" title="Copy this instruction prompt into ChatGPT or Copilot Chat along with the actual drawing package PDF.">
+                    Prompt to paste into ChatGPT/Copilot with the attached PDF
+                    <textarea className="manual-ai-textarea" readOnly value={manualAIPrompt} rows={8} />
+                  </label>
+
+                  <div
+                    className="manual-import-dropzone"
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={handleManualAIDrop}
+                  >
+                    <label className="field-label" title="Paste, drag, or import the update JSON from ChatGPT or Copilot Chat here.">
+                      Paste AI update JSON
+                      <textarea
+                        className="manual-ai-textarea"
+                        value={manualAIResponse}
+                        rows={7}
+                        onChange={(event) => {
+                          setManualAIResponse(event.target.value);
+                          setManualAIPreview(null);
+                        }}
+                        placeholder='Paste JSON like {"updates":[...]}, or drag a .json/.txt response file here.'
+                      />
+                    </label>
+                    <div className="manual-import-tools">
+                      <button className="secondary-button" type="button" onClick={() => void handlePasteManualAIResponse()} title="Read the AI response JSON from your clipboard">
+                        <ClipboardPaste size={16} />
+                        Paste from Clipboard
+                      </button>
+                      <label className="secondary-button file-import-button" title="Import a saved ChatGPT/Copilot JSON or text response file">
+                        <Upload size={16} />
+                        Import JSON/TXT
+                        <input type="file" accept="application/json,.json,.txt,text/plain" onChange={handleManualAIFileInput} aria-label="Import AI JSON or text response file" />
+                      </label>
+                      <span>Drop a response file here, then preview before importing.</span>
+                    </div>
+                  </div>
+
+                  <div className="button-row manual-ai-buttons">
+                    <button
+                      className="primary-button"
+                      type="button"
+                      disabled={!manualAIResponse.trim() || previewingManualAI}
+                      title="Parse the pasted ChatGPT/Copilot output before creating findings"
+                      onClick={() => void handlePreviewManualAIResponse()}
+                    >
+                      <Sparkles size={17} className={previewingManualAI ? "spin" : ""} />
+                      {previewingManualAI ? "Previewing" : "Preview AI Updates"}
+                    </button>
+                    <button
+                      className="download-pdf-button inline-download-button"
+                      type="button"
+                      disabled={!manualAIPreview?.valid_recoverable_updates || importingManualAI}
+                      title="Import only the valid recoverable updates from the preview"
+                      onClick={() => void handleImportManualAIResponse()}
+                    >
+                      <Sparkles size={18} className={importingManualAI ? "spin" : ""} />
+                      {importingManualAI ? "Importing AI Updates" : "Import Valid Updates"}
+                    </button>
+                  </div>
+                  <AIPreviewPanel preview={manualAIPreview} />
+                </section>
+              ) : null}
+
+              <AIImportHistory
+                batches={aiImportBatches}
+                rollingBackBatchId={rollingBackBatchId}
+                onRollbackBatch={handleRollbackImportBatch}
+              />
+              <ReadinessPanel readiness={readiness} onRefresh={refreshReadiness} />
+              <AuditLogPanel events={events} />
+            </section>
+          ) : null}
+
+          {leftRailCard === "projects" ? (
+            <ProjectsPanel
+              projects={projects}
+              selectedProjectId={selectedProjectId}
+              loading={loadingProjects}
+              uploading={uploading}
+              creatingSample={creatingSample}
+              deletingProjectId={deletingProjectId}
+              exportingPackage={exportingPackage}
+              importingPackage={importingPackage}
+              onSelectProject={setSelectedProjectId}
+              onRefresh={refreshProjects}
+              onUpload={handleUpload}
+              onSampleProject={handleSampleProject}
+              onDeleteProject={handleDeleteProject}
+              onExportPackage={handleExportProjectPackage}
+              onImportPackage={handleImportProjectPackage}
+            />
+          ) : null}
+
+          {leftRailCard === "sheets" ? (
+            <SheetsPanel
+              sheets={sheets}
+              findings={findings}
+              selectedSheetId={selectedSheetId}
+              disabled={!selectedProject}
+              onSelectSheet={handleSelectSheet}
+            />
+          ) : null}
+
+          {leftRailCard === "findings" ? (
+            <FindingsPanel
+              findings={findings}
+              sheets={sheets}
+              selectedFinding={selectedFinding}
+              scrollFindingId={selectedFinding?.id ?? lastSelectedFindingId}
+              selectedProject={selectedProject}
+              reviewProgress={reviewProgress}
+              autoAdvanceReview={autoAdvanceReview}
+              onAutoAdvanceChange={setAutoAdvanceReview}
+              onSelectFinding={handleSelectFinding}
+              onBulkPatchFindings={handleBulkPatchFindings}
+            />
+          ) : null}
+
+          {leftRailCard === "inspector" ? (
+            <FindingInspector
+              finding={selectedFinding}
+              findings={findings}
+              sheet={selectedFinding ? getFindingSheet(selectedFinding, sheets) : undefined}
+              saving={selectedFinding ? savingFindingId === selectedFinding.id : false}
+              deleting={selectedFinding ? deletingFindingId === selectedFinding.id : false}
+              merging={selectedFinding ? mergingFindingId === selectedFinding.id : false}
+              onPatchFinding={handlePatchFinding}
+              onDeleteFinding={handleDeleteFinding}
+              onMergeFinding={handleMergeFinding}
+            />
+          ) : null}
+
+          {leftRailCard === "export" ? (
+            <ExportPanel
+              project={selectedProject}
+              findings={findings}
+              events={events}
+              onExportComplete={(response) => {
+                setActiveMarkedPdfUrl(response.marked_pdf ?? null);
+                setLeftRailCard("export");
+                setLeftRailCollapsed(false);
+                return refreshReview();
+              }}
+            />
+          ) : null}
+
+          {leftRailCard === "advanced" ? (
+            <AdvancedFeaturesPanel
+              project={selectedProject}
+              settings={markupMemorySettings}
+              stats={markupMemoryStats}
+              preview={markupMemoryPreview}
+              loading={loadingMarkupMemory}
+              saving={savingMarkupMemory}
+              rebuilding={rebuildingMarkupMemory}
+              clearing={clearingMarkupMemory}
+              onRefresh={refreshMarkupMemory}
+              onUpdateSettings={handleUpdateMarkupMemorySettings}
+              onRebuild={handleRebuildMarkupMemory}
+              onClear={handleClearMarkupMemory}
+            />
+          ) : null}
+        </div>
+      </section>
+
       <main className="workspace">
-        <aside className="left-rail">
-          <ProjectsPanel
-            projects={projects}
-            selectedProjectId={selectedProjectId}
-            loading={loadingProjects}
-            uploading={uploading}
-            creatingSample={creatingSample}
-            onSelectProject={setSelectedProjectId}
-            onRefresh={refreshProjects}
-            onUpload={handleUpload}
-            onSampleProject={handleSampleProject}
-          />
-
-          <SheetsPanel
-            sheets={sheets}
-            findings={findings}
-            selectedSheetId={selectedSheetId}
-            disabled={!selectedProject}
-            onSelectSheet={setSelectedSheetId}
-          />
-        </aside>
-
         <section className="viewer-pane">
           <Viewer
             project={selectedProject}
@@ -338,28 +1513,19 @@ function App() {
             sheets={sheets}
             findings={findingsForSelectedSheet}
             selectedFinding={selectedFinding}
+            markedPdfUrl={activeMarkedPdfUrl}
             loading={loadingReview}
-            onSelectFinding={handleSelectFinding}
+            placementMessage={placementMessage}
+            placementSummary={placementSummary}
+            recalculatingPlacement={recalculatingPlacement}
+            onSelectFinding={handleSelectPdfMarkup}
             onStepSheet={handleStepSheet}
+            onPatchFinding={handlePatchFinding}
+            onRecalculatePlacement={handleRecalculatePlacement}
           />
         </section>
-
-        <aside className="right-rail">
-          <FindingsPanel
-            findings={findings}
-            sheets={sheets}
-            selectedFinding={selectedFinding}
-            selectedProject={selectedProject}
-            savingFindingId={savingFindingId}
-            deletingFindingId={deletingFindingId}
-            onSelectFinding={handleSelectFinding}
-            onPatchFinding={handlePatchFinding}
-            onDeleteFinding={handleDeleteFinding}
-          />
-
-          <ExportPanel project={selectedProject} findings={findings} />
-        </aside>
       </main>
+
     </div>
   );
 }
@@ -370,10 +1536,564 @@ interface ProjectsPanelProps {
   loading: boolean;
   uploading: boolean;
   creatingSample: boolean;
+  deletingProjectId: string | null;
+  exportingPackage: boolean;
+  importingPackage: boolean;
   onSelectProject: (projectId: string) => void;
   onRefresh: () => Promise<void>;
   onUpload: (name: string, file: File) => Promise<void>;
   onSampleProject: () => Promise<void>;
+  onDeleteProject: (project: Project) => Promise<void>;
+  onExportPackage: () => Promise<void>;
+  onImportPackage: (file: File | null) => Promise<void>;
+}
+
+function AIPreviewPanel({ preview }: { preview: AIPreviewResponse | null }) {
+  if (!preview) {
+    return null;
+  }
+
+  return (
+    <div className="ai-preview-panel" aria-label="AI import preview">
+      <div className="preview-summary">
+        <strong>{preview.valid_recoverable_updates}</strong>
+        <span>valid</span>
+        <strong>{preview.skipped_updates}</strong>
+        <span>skipped</span>
+        <strong>{preview.total_candidate_updates}</strong>
+        <span>candidates</span>
+      </div>
+      <div className="preview-metadata">
+        <span>{preview.schema_version ?? "autoqc-ai-updates-v1"}</span>
+        <span>{formatStatus(preview.parser_mode ?? "parser unknown")}</span>
+        <span>{formatStatus(preview.response_shape ?? "shape unknown")}</span>
+      </div>
+
+      {preview.parser_repairs_applied.length > 0 ? (
+        <div className="preview-note-list">
+          <strong>Parser repairs</strong>
+          {preview.parser_repairs_applied.map((repair) => (
+            <span key={repair}>{repair}</span>
+          ))}
+        </div>
+      ) : null}
+
+      {preview.warnings.length > 0 ? (
+        <div className="preview-note-list warning-list">
+          <strong>Warnings</strong>
+          {preview.warnings.slice(0, 8).map((warning) => (
+            <span key={warning}>{warning}</span>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="preview-update-list">
+        {preview.updates.map((update) => (
+          <div className={`preview-update ${update.will_import ? "importable" : "skipped"}`} key={`${preview.batch_id}-${update.index}`}>
+            <div className="preview-update-header">
+              <strong>
+                #{update.index} {previewActionLabel(update.action)}
+              </strong>
+              <span>{update.page_number ? `Page ${update.page_number}` : "No page"}</span>
+            </div>
+            <span>{update.target_text || "No target text"}</span>
+            <small>{update.required_update || update.skipped_reason || "No required update"}</small>
+            <small>{[update.category, update.severity, confidenceText(update.confidence)].filter(Boolean).join(" | ")}</small>
+            {update.duplicate_reason ? (
+              <small>
+                {update.duplicate_kind === "exact" ? "Exact duplicate" : "Likely duplicate"}: {update.duplicate_reason}
+                {update.related_update_indices?.length ? ` Related update ${update.related_update_indices.join(", ")}` : ""}
+              </small>
+            ) : null}
+            {update.missing_or_weak_fields?.length ? (
+              <small>Weak fields: {update.missing_or_weak_fields.join(", ")}</small>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AIImportHistory({
+  batches,
+  rollingBackBatchId,
+  onRollbackBatch,
+}: {
+  batches: AIImportBatch[];
+  rollingBackBatchId: string | null;
+  onRollbackBatch: (batch: AIImportBatch) => Promise<void>;
+}) {
+  if (!batches.length) {
+    return null;
+  }
+
+  return (
+    <details className="ai-history-panel collapsible-section" aria-label="Recent AI import batches">
+      <summary>
+        <span>
+          <strong>AI Import History</strong>
+          <small>{batches.length} batch{batches.length === 1 ? "" : "es"}</small>
+        </span>
+      </summary>
+      <div className="history-list">
+        {batches.slice(0, 5).map((batch) => (
+          <div className="history-row" key={batch.id}>
+            <div>
+              <strong>{formatStatus(batch.import_status)}</strong>
+              <span>
+                {batch.valid_count} valid | {batch.skipped_count} skipped | {batch.created_count} new | {batch.updated_count} updated
+              </span>
+            </div>
+            <small>{batch.prompt_version || batch.source_type || "unknown"} | {formatDate(batch.imported_at || batch.created_at)}</small>
+            {batch.metadata?.prompt_template_name ? <small>{String(batch.metadata.prompt_template_name)}</small> : null}
+            {batch.parser_warnings?.length ? <small>{batch.parser_warnings[0]}</small> : null}
+            {batch.import_status === "imported" ? (
+              <button
+                className="danger-button compact-action"
+                type="button"
+                disabled={rollingBackBatchId === batch.id}
+                onClick={() => void onRollbackBatch(batch)}
+                title="Remove findings created by this imported AI batch after confirmation"
+              >
+                {rollingBackBatchId === batch.id ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />}
+                Remove imported batch
+              </button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function previewActionLabel(action?: string): string {
+  if (action === "create_new") {
+    return "Create new";
+  }
+  if (action === "update_existing") {
+    return "Update existing";
+  }
+  if (action === "duplicate_in_response") {
+    return "Duplicate";
+  }
+  return "Skipped";
+}
+
+function confidenceText(value?: number | null): string {
+  return typeof value === "number" ? confidenceLabel(value) : "";
+}
+
+function DashboardSummary({
+  project,
+  findings,
+  batches,
+  events,
+  placementSummary,
+}: {
+  project: Project | null;
+  findings: Finding[];
+  batches: AIImportBatch[];
+  events: FindingEvent[];
+  placementSummary: PlacementSummary;
+}) {
+  const latestImport = batches.find((batch) => batch.import_status === "imported") ?? batches[0];
+  const latestExport = events.find((event) => event.action === "export_created");
+  const statusCounts = {
+    total: findings.length,
+    needsReview: countFindingsByStatus(findings, "needs_review"),
+    accepted: countFindingsByStatus(findings, "accepted"),
+    rejected: countFindingsByStatus(findings, "rejected"),
+  };
+  const manualPlacement = placementSummary.manual_placement_needed ?? 0;
+  const accepted = statusCounts.accepted;
+  const warnings = [
+    findings.length === 0 ? "No AI findings imported." : null,
+    manualPlacement > Math.max(2, findings.length * 0.35) ? "Many findings need manual placement." : null,
+    accepted === 0 ? "No accepted findings selected for accepted-only export." : null,
+    project && !project.source_pdf_url && !project.source_pdf_path ? "Source PDF missing or unavailable." : null,
+    latestExport?.changes?.validation_status === "failed" ? "Latest export validation failed." : null,
+  ].filter((item): item is string => Boolean(item));
+
+  return (
+    <section className="dashboard-summary compact-section" aria-label="Management review dashboard">
+      <div className="dashboard-grid">
+        <DashboardMetric label="Total" value={statusCounts.total} />
+        <DashboardMetric label="Needs review" value={statusCounts.needsReview} />
+        <DashboardMetric label="Accepted" value={statusCounts.accepted} />
+        <DashboardMetric label="Rejected" value={statusCounts.rejected} />
+      </div>
+      <div className="dashboard-detail">
+        <span>{placementSummaryText(placementSummary)}</span>
+        <span>Latest import: {latestImport ? `${formatStatus(latestImport.import_status)} ${formatDate(latestImport.imported_at || latestImport.created_at)}` : "none"}</span>
+        <span>Latest export: {latestExport ? formatDate(latestExport.created_at) : "none"}</span>
+      </div>
+      {warnings.length ? (
+        <div className="dashboard-warnings" role="status">
+          {warnings.map((warning) => (
+            <span key={warning}><AlertTriangle size={13} /> {warning}</span>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function DashboardMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="dashboard-metric">
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function ReadinessPanel({ readiness, onRefresh }: { readiness: ReadinessResponse | null; onRefresh: () => Promise<void> }) {
+  return (
+    <details className="readiness-panel collapsible-section" aria-label="System Check panel">
+      <summary>
+        <span>
+          <strong>System Check</strong>
+          <small>{readiness ? formatStatus(readiness.status) : "Not loaded"}</small>
+        </span>
+      </summary>
+      <div className="readiness-actions">
+        <button className="secondary-button compact-action" type="button" onClick={() => void onRefresh()} title="Run local readiness checks again">
+          <RefreshCw size={14} />
+          Refresh
+        </button>
+      </div>
+      <div className="readiness-list">
+        {(readiness?.checks ?? []).map((check) => (
+          <div className={`readiness-row ${check.ok ? "passed" : "warning"}`} key={check.name}>
+            {check.ok ? <Check size={14} /> : <AlertTriangle size={14} />}
+            <span>{check.name}</span>
+            <small>{check.detail}</small>
+          </div>
+        ))}
+      </div>
+      {readiness?.instructions ? (
+        <div className="readiness-instructions">
+          {Object.entries(readiness.instructions).map(([label, command]) => (
+            <code key={label}>{command}</code>
+          ))}
+        </div>
+      ) : null}
+    </details>
+  );
+}
+
+function AuditLogPanel({ events }: { events: FindingEvent[] }) {
+  if (!events.length) {
+    return null;
+  }
+  return (
+    <details className="audit-log-panel collapsible-section" aria-label="Full audit log">
+      <summary>
+        <span>
+          <strong>Audit Log</strong>
+          <small>{events.length} recent event{events.length === 1 ? "" : "s"}</small>
+        </span>
+      </summary>
+      <div className="audit-log-list">
+        {events.map((event) => (
+          <div className="audit-row full" key={event.id}>
+            <span>{humanAuditAction(event)}</span>
+            <small>Local reviewer | {formatDate(event.created_at)}</small>
+            {event.changes ? <code>{auditChangeSummary(event.changes)}</code> : null}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+interface AdvancedFeaturesPanelProps {
+  project: Project | null;
+  settings: MarkupMemorySettings | null;
+  stats: MarkupMemoryStats | null;
+  preview: MarkupMemoryPreview | null;
+  loading: boolean;
+  saving: boolean;
+  rebuilding: boolean;
+  clearing: boolean;
+  onRefresh: () => Promise<void>;
+  onUpdateSettings: (update: MarkupMemorySettingsUpdate) => Promise<void>;
+  onRebuild: () => Promise<void>;
+  onClear: () => Promise<void>;
+}
+
+function AdvancedFeaturesPanel({
+  project,
+  settings,
+  stats,
+  preview,
+  loading,
+  saving,
+  rebuilding,
+  clearing,
+  onRefresh,
+  onUpdateSettings,
+  onRebuild,
+  onClear,
+}: AdvancedFeaturesPanelProps) {
+  const disabled = loading || saving || !settings;
+  const categoryRows = Object.entries(stats?.examples_by_category ?? {}).slice(0, 6);
+
+  return (
+    <section className="panel advanced-features-panel" aria-label="Advanced Features">
+      <div className="panel-header">
+        <div>
+          <span className="eyebrow">Experimental / Power User Tools</span>
+          <h2>Advanced Features</h2>
+        </div>
+        <ShieldCheck size={18} />
+      </div>
+
+      <div className="advanced-body">
+        <section className="advanced-section" aria-label="Markup Memory settings">
+          <div className="advanced-section-header">
+            <div>
+              <strong>Markup Memory</strong>
+              <span>{loading ? "Loading" : "Past Review Knowledge Base"}</span>
+            </div>
+            <button className="secondary-button compact-action" type="button" onClick={() => void onRefresh()} disabled={loading} title="Refresh Markup Memory settings, stats, and preview">
+              <RefreshCw size={14} className={loading ? "spin" : ""} />
+              Refresh
+            </button>
+          </div>
+
+          <div className="inline-warning">
+            Past examples are guidance only. The attached PDF remains the source of truth, and memory never creates findings by itself.
+          </div>
+
+          <label className="checkbox-row advanced-toggle">
+            <input
+              type="checkbox"
+              checked={settings?.advanced_feature_enabled ?? false}
+              disabled={disabled}
+              onChange={(event) => void onUpdateSettings({ advanced_feature_enabled: event.target.checked })}
+            />
+            <span>Enable Advanced Features</span>
+            <strong>{settings?.advanced_feature_enabled ? "On" : "Off"}</strong>
+          </label>
+          <label className="checkbox-row advanced-toggle">
+            <input
+              type="checkbox"
+              checked={settings?.enabled ?? false}
+              disabled={disabled}
+              onChange={(event) => void onUpdateSettings({ enabled: event.target.checked })}
+            />
+            <span>Enable Markup Memory</span>
+            <strong>{settings?.enabled ? "On" : "Off"}</strong>
+          </label>
+          <label className="checkbox-row advanced-toggle">
+            <input
+              type="checkbox"
+              checked={settings?.include_in_prompts ?? false}
+              disabled={disabled}
+              onChange={(event) => void onUpdateSettings({ include_in_prompts: event.target.checked })}
+            />
+            <span>Include Markup Memory in generated prompts</span>
+            <strong>{settings?.include_in_prompts ? "On" : "Off"}</strong>
+          </label>
+          <label className="checkbox-row advanced-toggle">
+            <input
+              type="checkbox"
+              checked={settings?.include_accepted_examples ?? true}
+              disabled={disabled}
+              onChange={(event) => void onUpdateSettings({ include_accepted_examples: event.target.checked })}
+            />
+            <span>Include accepted examples</span>
+            <strong>{settings?.include_accepted_examples ? "On" : "Off"}</strong>
+          </label>
+          <label className="checkbox-row advanced-toggle">
+            <input
+              type="checkbox"
+              checked={settings?.include_edited_examples ?? true}
+              disabled={disabled}
+              onChange={(event) => void onUpdateSettings({ include_edited_examples: event.target.checked })}
+            />
+            <span>Include edited examples</span>
+            <strong>{settings?.include_edited_examples ? "On" : "Off"}</strong>
+          </label>
+          <label className="checkbox-row advanced-toggle">
+            <input
+              type="checkbox"
+              checked={settings?.include_rejected_examples ?? true}
+              disabled={disabled}
+              onChange={(event) => void onUpdateSettings({ include_rejected_examples: event.target.checked })}
+            />
+            <span>Include rejected/duplicate avoid examples</span>
+            <strong>{settings?.include_rejected_examples ? "On" : "Off"}</strong>
+          </label>
+
+          <div className="advanced-number-grid">
+            <label className="field-label">
+              Max examples per prompt
+              <input
+                type="number"
+                min={1}
+                max={25}
+                value={settings?.max_examples_per_prompt ?? 8}
+                disabled={disabled}
+                onChange={(event) => void onUpdateSettings({ max_examples_per_prompt: Number(event.target.value) })}
+              />
+            </label>
+            <label className="field-label">
+              Max avoid examples
+              <input
+                type="number"
+                min={1}
+                max={25}
+                value={settings?.max_avoid_examples_per_prompt ?? 5}
+                disabled={disabled}
+                onChange={(event) => void onUpdateSettings({ max_avoid_examples_per_prompt: Number(event.target.value) })}
+              />
+            </label>
+            <label className="field-label">
+              Minimum usefulness score
+              <input
+                type="number"
+                min={0}
+                max={5}
+                step={0.1}
+                value={settings?.min_usefulness_score ?? 0}
+                disabled={disabled}
+                onChange={(event) => void onUpdateSettings({ min_usefulness_score: Number(event.target.value) })}
+              />
+            </label>
+          </div>
+
+          <div className="button-row advanced-actions">
+            <button className="primary-button" type="button" disabled={rebuilding} onClick={() => void onRebuild()} title="Rebuild Markup Memory from existing reviewed findings and exports">
+              {rebuilding ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+              Rebuild Memory From Existing Findings
+            </button>
+            <button className="danger-button" type="button" disabled={clearing} onClick={() => void onClear()} title="Clear all learned Markup Memory examples after confirmation">
+              {clearing ? <Loader2 size={16} className="spin" /> : <Trash2 size={16} />}
+              Clear Markup Memory
+            </button>
+          </div>
+        </section>
+
+        <section className="advanced-section" aria-label="Markup Memory stats">
+          <div className="advanced-section-header">
+            <div>
+              <strong>Memory Stats</strong>
+              <span>{stats?.total_memory_examples ?? 0} total memory examples</span>
+            </div>
+          </div>
+          <div className="memory-stats-grid">
+            <MemoryMetric label="Total" value={stats?.total_memory_examples ?? 0} />
+            <MemoryMetric label="Accepted" value={stats?.accepted_examples ?? 0} />
+            <MemoryMetric label="Edited" value={stats?.edited_examples ?? 0} />
+            <MemoryMetric label="Rejected" value={stats?.rejected_examples ?? 0} />
+            <MemoryMetric label="Duplicate" value={stats?.duplicate_examples ?? 0} />
+            <MemoryMetric label="Exported" value={stats?.exported_examples ?? 0} />
+          </div>
+          {categoryRows.length ? (
+            <div className="memory-category-list">
+              {categoryRows.map(([category, count]) => (
+                <span key={category}>{formatStatus(category)}: {count}</span>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state compact">
+              <strong>No memory examples yet</strong>
+              <small>Review or export AI findings, then rebuild or continue working.</small>
+            </div>
+          )}
+        </section>
+
+        <section className="advanced-section" aria-label="Markup Memory prompt preview">
+          <div className="advanced-section-header">
+            <div>
+              <strong>Memory examples that would be included in the next prompt</strong>
+              <span>{project ? project.name : "Select a project"}</span>
+            </div>
+          </div>
+          {!project ? (
+            <div className="empty-state compact">
+              <strong>No project selected</strong>
+              <small>Select a project to preview prompt memory context.</small>
+            </div>
+          ) : preview?.prompt_section ? (
+            <pre className="memory-preview-text">{preview.prompt_section}</pre>
+          ) : (
+            <div className="inline-helper">{preview?.disabled_reason ?? "No Markup Memory prompt context would be injected."}</div>
+          )}
+          <MemoryExampleList title="Examples to emulate" examples={preview?.positive_examples ?? []} />
+          <MemoryExampleList title="Examples to avoid" examples={preview?.avoid_examples ?? []} />
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function MemoryMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="dashboard-metric memory-metric">
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function MemoryExampleList({ title, examples }: { title: string; examples: MarkupMemoryPreview["positive_examples"] }) {
+  if (!examples.length) {
+    return null;
+  }
+  return (
+    <div className="memory-example-list">
+      <strong>{title}</strong>
+      {examples.slice(0, 8).map((example) => (
+        <div className="memory-example-row" key={`${example.id}-${example.status_outcome}`}>
+          <div className="preview-update-header">
+            <span>{memoryOutcomeLabel(example.status_outcome)} | {example.drawing_number || "Drawing unknown"} | Page {example.page_number ?? "?"}</span>
+            <small>{typeof example.similarity_score === "number" ? example.similarity_score.toFixed(2) : ""}</small>
+          </div>
+          <span>{example.target_text || example.sheet_title || "No target text stored"}</span>
+          <small>{example.final_comment_text || example.required_update || example.rationale || "No comment text stored"}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function memoryOutcomeLabel(value: string): string {
+  return formatStatus(value.replace(/_/g, " "));
+}
+
+function HelpDialog({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="How to use AutoQC">
+      <section className="help-dialog">
+        <div className="manual-ai-header">
+          <div>
+            <strong>How to use AutoQC</strong>
+            <span>Local drawing QC tracker workflow</span>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close help">
+            <X size={16} />
+          </button>
+        </div>
+        <ol className="help-steps">
+          <li>Upload PDF or create the sample project.</li>
+          <li>Generate Chat Prompt.</li>
+          <li>Attach the same PDF in ChatGPT or Copilot.</li>
+          <li>Paste the returned JSON into AutoQC.</li>
+          <li>Preview/import valid updates.</li>
+          <li>Review, accept, reject, edit, merge, or defer findings.</li>
+          <li>Recalculate placement if needed.</li>
+          <li>Export the marked PDF and review package.</li>
+        </ol>
+        <div className="inline-warning">
+          AutoQC is a workflow aid, not engineering authority. Final judgment remains with the responsible reviewer, and the prompt alone is not the drawing source of truth.
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function ProjectsPanel({
@@ -382,17 +2102,44 @@ function ProjectsPanel({
   loading,
   uploading,
   creatingSample,
+  deletingProjectId,
+  exportingPackage,
+  importingPackage,
   onSelectProject,
   onRefresh,
   onUpload,
   onSampleProject,
+  onDeleteProject,
+  onExportPackage,
+  onImportPackage,
 }: ProjectsPanelProps) {
   const [name, setName] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  function validatePdf(candidate: File | null): string | null {
+    if (!candidate) {
+      return "Select a PDF drawing package before uploading.";
+    }
+
+    const looksLikePdf = candidate.type === "application/pdf" || candidate.name.toLowerCase().endsWith(".pdf");
+    return looksLikePdf ? null : "AutoQC only accepts PDF drawing packages. Choose a .pdf file.";
+  }
+
+  function handleFileChange(candidate: File | null) {
+    setFile(candidate);
+    setUploadError(candidate ? validatePdf(candidate) : null);
+  }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file || uploading) {
+    if (uploading) {
+      return;
+    }
+
+    const validationMessage = validatePdf(file);
+    if (validationMessage || !file) {
+      setUploadError(validationMessage);
       return;
     }
 
@@ -401,7 +2148,7 @@ function ProjectsPanel({
   }
 
   return (
-    <section className="panel projects-panel">
+    <section className="panel projects-panel" aria-label="Review library and upload area">
       <div className="panel-header">
         <div>
           <span className="eyebrow">Projects</span>
@@ -411,73 +2158,153 @@ function ProjectsPanel({
           className="icon-button"
           type="button"
           onClick={() => void onRefresh()}
-          title="Refresh projects"
+          title="Refresh the project list from the backend"
           aria-label="Refresh projects"
         >
           <RefreshCw size={17} className={loading ? "spin" : ""} />
         </button>
       </div>
 
-      <form className="upload-form" onSubmit={handleSubmit}>
-        <label className="field-label">
-          Project name
-          <input
-            type="text"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Regulator station package"
-          />
-        </label>
+      <details className="collapsible-section upload-collapsible" open={!selectedProjectId || projects.length === 0}>
+        <summary>
+          <span>
+            <strong>Upload / sample package</strong>
+            <small>{selectedProjectId ? "Collapsed after a project is selected" : "Start a new review"}</small>
+          </span>
+        </summary>
+        <form className="upload-form" onSubmit={handleSubmit}>
+          <label className="field-label" title="Optional. If left blank, the PDF filename will be used as the project name.">
+            Project name
+            <input
+              type="text"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Regulator station package"
+              title="Optional project name for this drawing review"
+            />
+          </label>
 
-        <label className="field-label">
-          PDF drawing set
-          <input
-            type="file"
-            accept="application/pdf,.pdf"
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-          />
-        </label>
+          <label className="field-label" title="Choose a searchable or scanned PDF drawing package to upload and review.">
+            PDF drawing set
+            <input
+              type="file"
+              accept="application/pdf,.pdf"
+              title="Select a PDF drawing set to upload"
+              onChange={(event) => handleFileChange(event.target.files?.[0] ?? null)}
+            />
+          </label>
 
-        <div className="button-row">
-          <button className="primary-button" type="submit" disabled={!file || uploading}>
-            {uploading ? <Loader2 size={17} className="spin" /> : <Upload size={17} />}
-            Upload
-          </button>
+          {file && !uploadError ? (
+            <div className="inline-helper" role="status">Ready to upload: {file.name}</div>
+          ) : null}
+
+          {uploadError ? (
+            <div className="inline-error compact-error" role="alert">{uploadError}</div>
+          ) : null}
+
+          <div className="button-row">
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={!file || Boolean(uploadError) || uploading}
+              title={uploadError ? uploadError : file ? "Upload this PDF and extract sheets, page images, and prompt context" : "Select a PDF before uploading"}
+            >
+              {uploading ? <Loader2 size={17} className="spin" /> : <Upload size={17} />}
+              Upload
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void onSampleProject()}
+              disabled={creatingSample}
+              title="Create the built-in synthetic sample drawing package and extract sheet context"
+            >
+              {creatingSample ? <Loader2 size={17} className="spin" /> : <FolderOpen size={17} />}
+              Sample Package
+            </button>
+          </div>
+        </form>
+      </details>
+
+      <details className="collapsible-section package-collapsible">
+        <summary>
+          <span>
+            <strong>Backup / restore</strong>
+            <small>Portable AutoQC project packages</small>
+          </span>
+        </summary>
+        <div className="package-tools">
           <button
             className="secondary-button"
             type="button"
-            onClick={() => void onSampleProject()}
-            disabled={creatingSample}
+            disabled={!selectedProjectId || exportingPackage}
+            onClick={() => void onExportPackage()}
+            title="Export this project's metadata, AI findings, audit history, and safe local files"
           >
-            {creatingSample ? <Loader2 size={17} className="spin" /> : <FolderOpen size={17} />}
-            Sample
+            {exportingPackage ? <Loader2 size={16} className="spin" /> : <Archive size={16} />}
+            Export Project Package
           </button>
+          <label className="secondary-button file-import-button" title="Import a portable AutoQC project package zip">
+            {importingPackage ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}
+            Import Project Package
+            <input
+              type="file"
+              accept="application/zip,.zip"
+              aria-label="Import AutoQC project package"
+              disabled={importingPackage}
+              onChange={(event) => {
+                void onImportPackage(event.target.files?.[0] ?? null);
+                event.target.value = "";
+              }}
+            />
+          </label>
         </div>
-      </form>
+      </details>
 
       <div className="project-list" aria-label="Project list">
         {projects.length === 0 ? (
           <div className="empty-state compact">
             <FileText size={18} />
-            <span>No projects found</span>
+            <strong>No projects yet</strong>
+            <small>Upload a PDF drawing set or create the sample package to start the AutoQC workflow.</small>
           </div>
         ) : (
-          projects.map((project) => (
-            <button
-              className={`project-item ${project.id === selectedProjectId ? "selected" : ""}`}
-              type="button"
-              key={project.id}
-              onClick={() => onSelectProject(project.id)}
-            >
-              <span className="project-name">{project.name}</span>
-              <span className="project-meta">
-                {formatStatus(project.status)}
-                <span>{project.sheet_count ?? 0} sheets</span>
-                <span>{project.finding_count ?? project.findings_count ?? 0} findings</span>
-              </span>
-              <span className="project-date">{formatDate(project.updated_at)}</span>
-            </button>
-          ))
+          projects.map((project) => {
+            const isDeleting = deletingProjectId === project.id;
+
+            return (
+              <div
+                className={`project-item ${project.id === selectedProjectId ? "selected" : ""}`}
+                key={project.id}
+              >
+                <button
+                  className="project-select-button"
+                  type="button"
+                  onClick={() => onSelectProject(project.id)}
+                  disabled={isDeleting}
+                  title={`Open ${project.name} and load its sheets, findings, and audit history`}
+                >
+                  <span className="project-name">{project.name}</span>
+                  <span className="project-meta">
+                    {formatStatus(project.status)}
+                    <span>{project.sheet_count ?? 0} sheets</span>
+                    <span>{project.finding_count ?? project.findings_count ?? 0} AI findings</span>
+                  </span>
+                  <span className="project-date">{formatDate(project.updated_at)}</span>
+                </button>
+                <button
+                  className="project-delete-button"
+                  type="button"
+                  onClick={() => void onDeleteProject(project)}
+                  disabled={isDeleting}
+                  title={`Delete ${project.name}`}
+                  aria-label={`Delete ${project.name}`}
+                >
+                  {isDeleting ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />}
+                </button>
+              </div>
+            );
+          })
         )}
       </div>
     </section>
@@ -500,7 +2327,7 @@ function SheetsPanel({
   onSelectSheet,
 }: SheetsPanelProps) {
   return (
-    <section className="panel sheets-panel">
+    <section className="panel sheets-panel" id="sheet-index" aria-label="Sheet package index">
       <div className="panel-header">
         <div>
           <span className="eyebrow">Sheets</span>
@@ -512,12 +2339,14 @@ function SheetsPanel({
       {disabled ? (
         <div className="empty-state compact">
           <FileText size={18} />
-          <span>No project selected</span>
+          <strong>No project selected</strong>
+          <small>Select or upload a drawing review before browsing sheets.</small>
         </div>
       ) : sheets.length === 0 ? (
         <div className="empty-state compact">
           <FileText size={18} />
-          <span>No sheets returned</span>
+          <strong>No sheets returned</strong>
+          <small>The backend did not extract sheet pages for this project. Try refreshing or re-uploading the PDF.</small>
         </div>
       ) : (
         <div className="sheet-list" aria-label="Sheet list">
@@ -530,6 +2359,7 @@ function SheetsPanel({
                 type="button"
                 key={sheet.id}
                 onClick={() => onSelectSheet(sheet.id)}
+                title={`Preview ${sheet.drawing_number || `Sheet ${sheet.page_number}`} and show its related findings`}
               >
                 <span className="sheet-page">P{sheet.page_number}</span>
                 <span className="sheet-main">
@@ -555,10 +2385,21 @@ interface ViewerProps {
   sheets: Sheet[];
   findings: Finding[];
   selectedFinding: Finding | null;
+  markedPdfUrl: string | null;
   loading: boolean;
+  placementMessage: string | null;
+  placementSummary: PlacementSummary | null;
+  recalculatingPlacement: boolean;
   onSelectFinding: (finding: Finding) => void;
   onStepSheet: (delta: number) => void;
+  onPatchFinding: (findingId: string, update: FindingUpdate) => Promise<void>;
+  onRecalculatePlacement: () => Promise<void>;
 }
+
+type ViewerWheelLikeEvent = Pick<
+  WheelEvent<HTMLDivElement>,
+  "clientX" | "clientY" | "ctrlKey" | "deltaX" | "deltaY" | "metaKey" | "preventDefault" | "shiftKey"
+>;
 
 function Viewer({
   project,
@@ -566,21 +2407,402 @@ function Viewer({
   sheets,
   findings,
   selectedFinding,
+  markedPdfUrl,
   loading,
+  placementMessage,
+  placementSummary,
+  recalculatingPlacement,
   onSelectFinding,
   onStepSheet,
+  onPatchFinding,
+  onRecalculatePlacement,
 }: ViewerProps) {
   const [imageSize, setImageSize] = useState<ImageSize | null>(null);
   const [imageFailed, setImageFailed] = useState(false);
+  const [zoom, setZoom] = useState(0.75);
+  const [viewerMode, setViewerMode] = useState<ViewerMode>("sheet");
+  const panViewportRef = useRef<HTMLDivElement | null>(null);
+  const panDragRef = useRef({ active: false, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 });
+  const touchPanRef = useRef({ active: false, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 });
+  const pinchRef = useRef({ active: false, startDistance: 0, startZoom: 1, centerX: 0, centerY: 0, scrollLeft: 0, scrollTop: 0 });
+  const zoomRef = useRef(zoom);
+  const wheelZoomFrameRef = useRef<number | null>(null);
+  const wheelZoomDeltaRef = useRef(0);
+  const wheelZoomAnchorRef = useRef({ centerX: 0, centerY: 0 });
   const imageUrl = resolveAssetUrl(sheet?.image_url ?? sheet?.image_path);
+  const sourcePdfUrl = resolveAssetUrl(project?.source_pdf_url ?? project?.source_pdf_path);
+  const markedPdfAssetUrl = resolveAssetUrl(markedPdfUrl);
+  const markedPdfViewerUrl = markedPdfAssetUrl
+    ? `${markedPdfAssetUrl}#page=${sheet?.page_number ?? 1}&view=FitH`
+    : undefined;
   const sheetIndex = sheet ? sheets.findIndex((item) => item.id === sheet.id) : -1;
   const canGoPrev = sheetIndex > 0;
   const canGoNext = sheetIndex >= 0 && sheetIndex < sheets.length - 1;
-
+  const selectedFindingOnSheet = sheet && selectedFinding && findingMatchesSheet(selectedFinding, sheet) ? selectedFinding : null;
+  const selectedFindingBox = useMemo(
+    () => (selectedFindingOnSheet && sheet ? getOverlayBoxPercent(selectedFindingOnSheet, sheet, imageSize) : null),
+    [selectedFindingOnSheet, sheet, imageSize],
+  );
+  const activeViewerMode: ViewerMode = viewerMode === "focus" && !selectedFindingOnSheet
+    ? "sheet"
+    : viewerMode === "marked" && !markedPdfViewerUrl
+      ? "sheet"
+      : viewerMode;
   useEffect(() => {
     setImageSize(null);
     setImageFailed(false);
+    zoomRef.current = 0.75;
+    setZoom(0.75);
   }, [sheet?.id, imageUrl]);
+
+  useEffect(() => {
+    if (!imageSize) {
+      return;
+    }
+
+    const fitZoom = getFitZoom();
+    if (fitZoom) {
+      zoomRef.current = fitZoom;
+      setZoom(fitZoom);
+    }
+  }, [imageSize?.width, imageSize?.height]);
+
+  useEffect(() => {
+    if (selectedFinding) {
+      setViewerMode("focus");
+    }
+  }, [selectedFinding?.id]);
+
+  useEffect(() => {
+    if (viewerMode === "focus" && !selectedFindingOnSheet) {
+      setViewerMode("sheet");
+    }
+  }, [viewerMode, selectedFindingOnSheet]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => {
+    return () => {
+      if (wheelZoomFrameRef.current !== null) {
+        cancelAnimationFrame(wheelZoomFrameRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const viewport = panViewportRef.current;
+    if (!viewport || !imageUrl || imageFailed) {
+      return undefined;
+    }
+
+    const handleNativeWheel = (event: Event) => {
+      const wheelEvent = event as unknown as ViewerWheelLikeEvent;
+      if (!wheelEvent.ctrlKey && !wheelEvent.metaKey) {
+        return;
+      }
+      handleViewportWheel(wheelEvent);
+    };
+
+    viewport.addEventListener("wheel", handleNativeWheel, { passive: false });
+    return () => {
+      viewport.removeEventListener("wheel", handleNativeWheel);
+    };
+  }, [imageUrl, imageFailed]);
+
+  useEffect(() => {
+    if (activeViewerMode !== "focus" || !imageSize || !selectedFindingBox || !panViewportRef.current) {
+      return;
+    }
+
+    const viewport = panViewportRef.current;
+    const targetWidth = Math.max(24, imageSize.width * (selectedFindingBox.width / 100));
+    const targetHeight = Math.max(24, imageSize.height * (selectedFindingBox.height / 100));
+    const fitZoom = getFitZoom() ?? minZoom;
+    const focusZoom = clamp(
+      Math.min(viewport.clientWidth / (targetWidth * 3), viewport.clientHeight / (targetHeight * 3)),
+      Math.max(fitZoom, 0.35),
+      4,
+    );
+    zoomRef.current = focusZoom;
+    setZoom(focusZoom);
+
+    requestAnimationFrame(() => {
+      const scaledWidth = imageSize.width * focusZoom;
+      const scaledHeight = imageSize.height * focusZoom;
+      const centerX = scaledWidth * ((selectedFindingBox.left + selectedFindingBox.width / 2) / 100);
+      const centerY = scaledHeight * ((selectedFindingBox.top + selectedFindingBox.height / 2) / 100);
+      viewport.scrollLeft = Math.max(0, centerX - viewport.clientWidth / 2);
+      viewport.scrollTop = Math.max(0, centerY - viewport.clientHeight / 2);
+    });
+  }, [activeViewerMode, imageSize?.width, imageSize?.height, selectedFindingBox?.left, selectedFindingBox?.top, selectedFindingBox?.width, selectedFindingBox?.height, selectedFindingOnSheet?.id]);
+
+  const minZoom = 0.1;
+  const maxZoom = 5;
+  const zoomPercent = Math.round(zoom * 100);
+  const canZoomOut = zoom > minZoom;
+  const canZoomIn = zoom < maxZoom;
+
+  function getFitZoom() {
+    if (!imageSize || !panViewportRef.current) {
+      return null;
+    }
+
+    const viewport = panViewportRef.current;
+    const availableWidth = Math.max(240, viewport.clientWidth - 48);
+    const availableHeight = Math.max(180, viewport.clientHeight - 48);
+    const nextZoom = Math.min(availableWidth / imageSize.width, availableHeight / imageSize.height);
+    return clamp(Math.round(nextZoom * 100) / 100, minZoom, 2);
+  }
+
+  function fitToViewport() {
+    const fitZoom = getFitZoom();
+    setZoom(fitZoom ?? 0.75);
+    requestAnimationFrame(() => {
+      if (!panViewportRef.current) {
+        return;
+      }
+      panViewportRef.current.scrollLeft = 0;
+      panViewportRef.current.scrollTop = 0;
+    });
+  }
+
+  function applyZoom(nextZoom: number, centerX?: number, centerY?: number) {
+    const viewport = panViewportRef.current;
+    const previousZoom = zoomRef.current;
+    const boundedZoom = clamp(Math.round(nextZoom * 1000) / 1000, minZoom, maxZoom);
+
+    if (boundedZoom === previousZoom) {
+      return;
+    }
+
+    zoomRef.current = boundedZoom;
+
+    if (!viewport || centerX === undefined || centerY === undefined) {
+      setZoom(boundedZoom);
+      return;
+    }
+
+    const previousScrollLeft = viewport.scrollLeft;
+    const previousScrollTop = viewport.scrollTop;
+    setZoom(boundedZoom);
+
+    requestAnimationFrame(() => {
+      const scale = boundedZoom / previousZoom;
+      viewport.scrollLeft = (previousScrollLeft + centerX) * scale - centerX;
+      viewport.scrollTop = (previousScrollTop + centerY) * scale - centerY;
+    });
+  }
+
+  function changeZoom(delta: number) {
+    applyZoom(zoom + delta);
+  }
+
+  function focusFindingInViewer(finding: Finding) {
+    if (!sheet || !imageSize || !panViewportRef.current) {
+      return;
+    }
+
+    const box = getOverlayBoxPercent(finding, sheet, imageSize);
+    if (!box) {
+      return;
+    }
+
+    const viewport = panViewportRef.current;
+    const targetWidth = Math.max(24, imageSize.width * (box.width / 100));
+    const targetHeight = Math.max(24, imageSize.height * (box.height / 100));
+    const fitZoom = getFitZoom() ?? minZoom;
+    const focusZoom = clamp(
+      Math.min(viewport.clientWidth / (targetWidth * 3), viewport.clientHeight / (targetHeight * 3)),
+      Math.max(fitZoom, 0.35),
+      4,
+    );
+
+    setViewerMode("focus");
+    zoomRef.current = focusZoom;
+    setZoom(focusZoom);
+
+    requestAnimationFrame(() => {
+      const scaledWidth = imageSize.width * focusZoom;
+      const scaledHeight = imageSize.height * focusZoom;
+      const centerX = scaledWidth * ((box.left + box.width / 2) / 100);
+      const centerY = scaledHeight * ((box.top + box.height / 2) / 100);
+      viewport.scrollLeft = Math.max(0, centerX - viewport.clientWidth / 2);
+      viewport.scrollTop = Math.max(0, centerY - viewport.clientHeight / 2);
+    });
+  }
+
+  function handleOverlayFindingClick(finding: Finding) {
+    onSelectFinding(finding);
+    focusFindingInViewer(finding);
+  }
+
+  function handlePanWheel(event: WheelEvent<HTMLDivElement>) {
+    if (event.ctrlKey || event.metaKey) {
+      return;
+    }
+    handleViewportWheel(event);
+  }
+
+  function handleViewportWheel(event: ViewerWheelLikeEvent) {
+    const viewport = panViewportRef.current;
+    if (!viewport || !imageUrl) {
+      return;
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      wheelZoomAnchorRef.current = {
+        centerX: event.clientX - rect.left,
+        centerY: event.clientY - rect.top,
+      };
+      wheelZoomDeltaRef.current += clamp(event.deltaY, -80, 80);
+
+      if (wheelZoomFrameRef.current !== null) {
+        return;
+      }
+
+      wheelZoomFrameRef.current = requestAnimationFrame(() => {
+        wheelZoomFrameRef.current = null;
+        const delta = wheelZoomDeltaRef.current;
+        wheelZoomDeltaRef.current = 0;
+        const scale = Math.exp(-delta * 0.0016);
+        const anchor = wheelZoomAnchorRef.current;
+        applyZoom(zoomRef.current * scale, anchor.centerX, anchor.centerY);
+      });
+      return;
+    }
+  }
+
+  function handlePanMouseDown(event: MouseEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !panViewportRef.current) {
+      return;
+    }
+    panDragRef.current = {
+      active: true,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: panViewportRef.current.scrollLeft,
+      scrollTop: panViewportRef.current.scrollTop,
+    };
+  }
+
+  function handlePanMouseMove(event: MouseEvent<HTMLDivElement>) {
+    const drag = panDragRef.current;
+    if (!drag.active || !panViewportRef.current) {
+      return;
+    }
+    panViewportRef.current.scrollLeft = drag.scrollLeft - (event.clientX - drag.startX);
+    panViewportRef.current.scrollTop = drag.scrollTop - (event.clientY - drag.startY);
+  }
+
+  function stopPanning() {
+    panDragRef.current.active = false;
+  }
+
+  function getTouchDistance(event: TouchEvent<HTMLDivElement>) {
+    const first = event.touches.item(0);
+    const second = event.touches.item(1);
+    if (!first || !second) {
+      return 0;
+    }
+
+    return Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY);
+  }
+
+  function getTouchCenter(event: TouchEvent<HTMLDivElement>) {
+    const first = event.touches.item(0);
+    const second = event.touches.item(1);
+    const viewport = panViewportRef.current;
+    if (!first || !second || !viewport) {
+      return { x: 0, y: 0 };
+    }
+
+    const rect = viewport.getBoundingClientRect();
+    return {
+      x: (first.clientX + second.clientX) / 2 - rect.left,
+      y: (first.clientY + second.clientY) / 2 - rect.top,
+    };
+  }
+
+  function handlePanTouchStart(event: TouchEvent<HTMLDivElement>) {
+    const viewport = panViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    if (event.touches.length === 2) {
+      const center = getTouchCenter(event);
+      pinchRef.current = {
+        active: true,
+        startDistance: getTouchDistance(event),
+        startZoom: zoom,
+        centerX: center.x,
+        centerY: center.y,
+        scrollLeft: viewport.scrollLeft,
+        scrollTop: viewport.scrollTop,
+      };
+      touchPanRef.current.active = false;
+      return;
+    }
+
+    if (event.touches.length === 1) {
+      const touch = event.touches.item(0);
+      if (!touch) {
+        return;
+      }
+      touchPanRef.current = {
+        active: true,
+        startX: touch.clientX,
+        startY: touch.clientY,
+        scrollLeft: viewport.scrollLeft,
+        scrollTop: viewport.scrollTop,
+      };
+      pinchRef.current.active = false;
+    }
+  }
+
+  function handlePanTouchMove(event: TouchEvent<HTMLDivElement>) {
+    const viewport = panViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    if (event.touches.length === 2 && pinchRef.current.active) {
+      event.preventDefault();
+      const pinch = pinchRef.current;
+      const nextDistance = getTouchDistance(event);
+      if (!pinch.startDistance || !nextDistance) {
+        return;
+      }
+      const nextZoom = clamp(Math.round((pinch.startZoom * (nextDistance / pinch.startDistance)) * 100) / 100, minZoom, maxZoom);
+      const scale = nextZoom / pinch.startZoom;
+      setZoom(nextZoom);
+      requestAnimationFrame(() => {
+        viewport.scrollLeft = (pinch.scrollLeft + pinch.centerX) * scale - pinch.centerX;
+        viewport.scrollTop = (pinch.scrollTop + pinch.centerY) * scale - pinch.centerY;
+      });
+      return;
+    }
+
+    if (event.touches.length === 1 && touchPanRef.current.active) {
+      event.preventDefault();
+      const touch = event.touches.item(0);
+      if (!touch) {
+        return;
+      }
+      const pan = touchPanRef.current;
+      viewport.scrollLeft = pan.scrollLeft - (touch.clientX - pan.startX);
+      viewport.scrollTop = pan.scrollTop - (touch.clientY - pan.startY);
+    }
+  }
+
+  function stopTouchPanning() {
+    touchPanRef.current.active = false;
+    pinchRef.current.active = false;
+  }
 
   return (
     <div className="viewer">
@@ -599,12 +2821,69 @@ function Viewer({
         </div>
 
         <div className="viewer-actions">
+          <div className="viewer-mode-toggle" role="tablist" aria-label="Viewer mode">
+            <button
+              className={activeViewerMode === "focus" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={activeViewerMode === "focus"}
+              onClick={() => setViewerMode("focus")}
+              disabled={!selectedFindingOnSheet}
+              title={selectedFindingOnSheet ? "Focus on the selected finding" : "Select a finding to use Finding Focus"}
+            >
+              Finding Focus
+            </button>
+            <button
+              className={activeViewerMode === "sheet" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={activeViewerMode === "sheet"}
+              onClick={() => setViewerMode("sheet")}
+            >
+              Full Sheet
+            </button>
+            <button
+              className={activeViewerMode === "marked" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={activeViewerMode === "marked"}
+              onClick={() => setViewerMode("marked")}
+              disabled={!markedPdfViewerUrl}
+              title={markedPdfViewerUrl ? "Preview the exported marked PDF" : "Export a marked PDF before using this preview"}
+            >
+              Marked PDF
+            </button>
+          </div>
+          <div className="zoom-controls" aria-label="Drawing zoom controls">
+            <button className="icon-button" type="button" onClick={() => changeZoom(-0.15)} disabled={!imageUrl || !canZoomOut} title="Zoom out" aria-label="Zoom out">
+              <ZoomOut size={17} />
+            </button>
+            <button className="zoom-level" type="button" onClick={() => setZoom(1)} disabled={!imageUrl} title="Reset to 100% zoom" aria-label="Reset zoom to 100 percent">
+              {zoomPercent}%
+            </button>
+            <button className="icon-button" type="button" onClick={() => changeZoom(0.15)} disabled={!imageUrl || !canZoomIn} title="Zoom in" aria-label="Zoom in">
+              <ZoomIn size={17} />
+            </button>
+            <button className="icon-button" type="button" onClick={fitToViewport} disabled={!imageUrl} title="Fit drawing to the review canvas" aria-label="Fit drawing to review canvas">
+              <Maximize2 size={16} />
+            </button>
+            {imageUrl ? (
+              <a className="icon-button viewer-open-link" href={imageUrl} target="_blank" rel="noreferrer" title="Open the page image in a new browser tab" aria-label="Open page image in a new browser tab">
+                <ExternalLink size={16} />
+              </a>
+            ) : null}
+            {sourcePdfUrl ? (
+              <a className="icon-button viewer-open-link" href={sourcePdfUrl} target="_blank" rel="noreferrer" title="Open the source PDF in a new browser tab" aria-label="Open source PDF in a new browser tab">
+                <FileText size={16} />
+              </a>
+            ) : null}
+          </div>
           <button
             className="icon-button"
             type="button"
             onClick={() => onStepSheet(-1)}
             disabled={!canGoPrev}
-            title="Previous sheet"
+            title="Show the previous drawing sheet in this package"
             aria-label="Previous sheet"
           >
             <ChevronLeft size={18} />
@@ -614,13 +2893,20 @@ function Viewer({
             type="button"
             onClick={() => onStepSheet(1)}
             disabled={!canGoNext}
-            title="Next sheet"
+            title="Show the next drawing sheet in this package"
             aria-label="Next sheet"
           >
             <ChevronRight size={18} />
           </button>
         </div>
       </div>
+
+      {(placementMessage || placementSummary) ? (
+        <div className="viewer-placement-summary" role="status">
+          {placementMessage ? <strong>{placementMessage}</strong> : null}
+          {placementSummary ? <span>{placementSummaryText(placementSummary)}</span> : null}
+        </div>
+      ) : null}
 
       <div className="drawing-surface">
         {loading ? (
@@ -631,56 +2917,140 @@ function Viewer({
         ) : !project ? (
           <div className="empty-state">
             <FolderOpen size={26} />
-            <span>No project selected</span>
+            <strong>No project selected</strong>
+            <small>Choose a review from Projects, upload a PDF, or create the sample package to begin.</small>
           </div>
         ) : !sheet ? (
           <div className="empty-state">
             <FileText size={26} />
-            <span>No sheets available</span>
+            <strong>No sheets available</strong>
+            <small>AutoQC could not find extracted sheets for this project. Refresh or re-upload the package.</small>
+          </div>
+        ) : activeViewerMode === "marked" && markedPdfViewerUrl ? (
+          <div className="pdf-preview-stage">
+            <iframe
+              className="marked-pdf-frame"
+              src={markedPdfViewerUrl}
+              title={`Marked PDF preview - ${sheetLabel(sheet)}`}
+            />
           </div>
         ) : imageUrl && !imageFailed ? (
-          <div className="drawing-stage">
-            <img
-              src={imageUrl}
-              alt={sheetLabel(sheet)}
-              onLoad={(event) => {
-                setImageSize({
-                  width: event.currentTarget.naturalWidth,
-                  height: event.currentTarget.naturalHeight,
-                });
+          <div
+            className="drawing-pan-viewport"
+            ref={panViewportRef}
+            aria-label="Scrollable drawing preview. Use the zoom controls, mouse wheel, trackpad pinch, or touch gestures to zoom and pan."
+            onWheel={handlePanWheel}
+            onMouseDown={handlePanMouseDown}
+            onMouseMove={handlePanMouseMove}
+            onMouseUp={stopPanning}
+            onMouseLeave={stopPanning}
+            onTouchStart={handlePanTouchStart}
+            onTouchMove={handlePanTouchMove}
+            onTouchEnd={stopTouchPanning}
+            onTouchCancel={stopTouchPanning}
+          >
+            <div
+              className="drawing-stage"
+              style={{
+                width: imageSize ? imageSize.width * zoom : undefined,
+                minWidth: imageSize ? imageSize.width * zoom : undefined,
+                height: imageSize ? imageSize.height * zoom : undefined,
+                minHeight: imageSize ? imageSize.height * zoom : undefined,
               }}
-              onError={() => setImageFailed(true)}
-            />
-            {findings.map((finding) => {
-              const rect = getOverlayRect(finding, sheet, imageSize);
-              if (!rect) {
-                return null;
-              }
+            >
+              <img
+                src={imageUrl}
+                alt={sheetLabel(sheet)}
+                draggable={false}
+                onLoad={(event) => {
+                  setImageSize({
+                    width: event.currentTarget.naturalWidth,
+                    height: event.currentTarget.naturalHeight,
+                  });
+                }}
+                onError={() => setImageFailed(true)}
+              />
+              {findings.map((finding) => {
+                const rect = getOverlayRect(finding, sheet, imageSize);
+                if (!rect) {
+                  return null;
+                }
 
-              return (
-                <button
-                  key={finding.id}
-                  type="button"
-                  className={`finding-overlay severity-${severityClass(
-                    finding.severity,
-                  )} status-${statusClass(finding.status)} ${
-                    finding.id === selectedFinding?.id ? "selected" : ""
-                  }`}
-                  style={rect}
-                  title={finding.title}
-                  aria-label={finding.title}
-                  onClick={() => onSelectFinding(finding)}
-                />
-              );
-            })}
+                return (
+                  <button
+                    key={finding.id}
+                    type="button"
+                    className={`finding-overlay severity-${severityClass(
+                      finding.severity,
+                    )} status-${statusClass(finding.status)} ${
+                      finding.id === selectedFinding?.id ? "selected" : ""
+                    }`}
+                    style={rect}
+                    title={finding.title}
+                    aria-label={finding.title}
+                    onClick={() => handleOverlayFindingClick(finding)}
+                  />
+                );
+              })}
+            </div>
           </div>
         ) : (
           <div className="drawing-placeholder">
             <FileText size={32} />
             <strong>{sheetLabel(sheet)}</strong>
             <span>No drawing image available</span>
+            <small>Use the extracted text below or open the source PDF from the toolbar to verify this sheet.</small>
           </div>
         )}
+        {selectedFindingOnSheet ? (
+          <aside
+            className={`viewer-finding-card ${selectedFindingBox ? "" : "page-level"}`}
+            aria-label="Selected finding review card"
+          >
+            <div className="viewer-finding-card-header">
+              <span className={`status-chip status-${statusClass(selectedFindingOnSheet.status)}`}>
+                {formatStatus(selectedFindingOnSheet.status)}
+              </span>
+              <span className={`placement-chip placement-${statusClass(findingPlacementStatus(selectedFindingOnSheet))}`}>
+                {placementQualityLabel(findingPlacementStatus(selectedFindingOnSheet))}
+              </span>
+            </div>
+            <strong>{selectedFindingOnSheet.title}</strong>
+            {!selectedFindingBox ? (
+              <div className="viewer-page-level-note">This finding is page-level only. Verify the target text in the attached/source PDF before accepting or exporting.</div>
+            ) : null}
+            <div className="viewer-finding-section">
+              <small>Final PDF comment</small>
+              <p>{selectedFindingOnSheet.comment_text}</p>
+            </div>
+            <div className="viewer-finding-section">
+              <small>Required update</small>
+              <p>{selectedFindingOnSheet.suggested_correction}</p>
+            </div>
+            <div className="viewer-finding-actions">
+              <button className="secondary-button" type="button" onClick={() => void onPatchFinding(selectedFindingOnSheet.id, { status: "accepted" })} title="Accept this selected finding">
+                <Check size={15} />
+                Accept
+              </button>
+              <button className="secondary-button" type="button" onClick={() => void onPatchFinding(selectedFindingOnSheet.id, { status: "needs_review" })} title="Return this selected finding to needs review">
+                <ClipboardCheck size={15} />
+                Needs Review
+              </button>
+              <button className="secondary-button" type="button" onClick={() => void onPatchFinding(selectedFindingOnSheet.id, { status: "rejected" })} title="Reject this selected finding">
+                <X size={15} />
+                Reject
+              </button>
+              <button className="secondary-button" type="button" onClick={() => onSelectFinding(selectedFindingOnSheet)} title="Open this finding in the Inspector panel">
+                <ClipboardCheck size={15} />
+                Edit in Inspector
+              </button>
+              <button className="secondary-button" type="button" disabled={recalculatingPlacement} onClick={() => void onRecalculatePlacement()} title="Recalculate text-based placement for imported AI findings">
+                {recalculatingPlacement ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
+                Recalculate Location
+              </button>
+            </div>
+          </aside>
+        ) : null}
       </div>
 
       {sheet?.text_content ? (
@@ -697,33 +3067,37 @@ interface FindingsPanelProps {
   findings: Finding[];
   sheets: Sheet[];
   selectedFinding: Finding | null;
+  scrollFindingId: string | null;
   selectedProject: Project | null;
-  savingFindingId: string | null;
-  deletingFindingId: string | null;
+  reviewProgress: { total: number; remaining: number; resolved: number };
+  autoAdvanceReview: boolean;
+  onAutoAdvanceChange: (enabled: boolean) => void;
   onSelectFinding: (finding: Finding) => void;
-  onPatchFinding: (findingId: string, update: FindingUpdate) => Promise<void>;
-  onDeleteFinding: (finding: Finding) => Promise<void>;
+  onBulkPatchFindings: (targetFindings: Finding[], update: FindingUpdate) => Promise<void>;
 }
 
 function FindingsPanel({
   findings,
   sheets,
   selectedFinding,
+  scrollFindingId,
   selectedProject,
-  savingFindingId,
-  deletingFindingId,
+  reviewProgress,
+  autoAdvanceReview,
+  onAutoAdvanceChange,
   onSelectFinding,
-  onPatchFinding,
-  onDeleteFinding,
+  onBulkPatchFindings,
 }: FindingsPanelProps) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [placementFilter, setPlacementFilter] = useState<PlacementFilter>("all");
   const [query, setQuery] = useState("");
+  const findingButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   const filteredFindings = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return findings.filter((finding) => {
       const matchesStatus = statusFilter === "all" || finding.status === statusFilter;
-      if (!matchesStatus) {
+      if (!matchesStatus || !matchesPlacementFilter(finding, placementFilter)) {
         return false;
       }
 
@@ -742,22 +3116,53 @@ function FindingsPanel({
         .filter(Boolean)
         .some((value) => value.toLowerCase().includes(needle));
     });
-  }, [findings, query, statusFilter]);
+  }, [findings, query, statusFilter, placementFilter]);
+
+  const hasActiveFindingFilters = statusFilter !== "all" || placementFilter !== "all" || query.trim().length > 0;
+
+  useEffect(() => {
+    if (!scrollFindingId || filteredFindings.every((finding) => finding.id !== scrollFindingId)) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      findingButtonRefs.current[scrollFindingId]?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }, [scrollFindingId, filteredFindings]);
 
   return (
-    <section className="panel findings-panel">
+    <section className="panel findings-panel" id="qc-log" aria-label="QC findings log">
       <div className="panel-header">
         <div>
           <span className="eyebrow">Findings</span>
-          <h2>QC Log</h2>
+          <h2>AI QC Log</h2>
         </div>
         <span className="count-pill">{findings.length}</span>
       </div>
 
       <div className="status-summary">
-        <StatusCounter label="Review" value={countFindingsByStatus(findings, "needs_review")} />
-        <StatusCounter label="Accepted" value={countFindingsByStatus(findings, "accepted")} />
-        <StatusCounter label="Rejected" value={countFindingsByStatus(findings, "rejected")} />
+        {STATUSES.map((status) => (
+          <StatusCounter key={status} label={formatStatus(status)} value={countFindingsByStatus(findings, status)} />
+        ))}
+      </div>
+
+      <div className="review-queue-card" role="status">
+        <div>
+          <strong>{reviewProgress.remaining} left to review</strong>
+          <span>{reviewProgress.resolved} resolved of {reviewProgress.total}</span>
+        </div>
+        <label className="checkbox-row compact-checkbox" title="After accepting or rejecting a finding, automatically select the next needs-review finding">
+          <input type="checkbox" checked={autoAdvanceReview} onChange={(event) => onAutoAdvanceChange(event.target.checked)} />
+          <span>Auto-advance</span>
+        </label>
+      </div>
+
+      <div className="shortcut-hints" aria-label="Reviewer keyboard shortcuts">
+        <span><kbd>A</kbd> Accept</span>
+        <span><kbd>X</kbd> Reject</span>
+        <span><kbd>R</kbd> Review</span>
+        <span><kbd>J/K</kbd> Finding</span>
+        <span><kbd>[ ]</kbd> Sheet</span>
       </div>
 
       <div className="finding-tools">
@@ -768,6 +3173,7 @@ function FindingsPanel({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search findings"
+            title="Filter findings by title, category, severity, comment, reasoning, or correction"
           />
         </div>
 
@@ -778,23 +3184,77 @@ function FindingsPanel({
               key={status}
               className={statusFilter === status ? "active" : ""}
               onClick={() => setStatusFilter(status)}
+              title={status === "all" ? "Show every finding" : `Show only ${formatStatus(status).toLowerCase()} findings`}
             >
               {status === "all" ? "All" : formatStatus(status)}
             </button>
           ))}
         </div>
+
+        <div className="segmented-control placement-filter" aria-label="Finding placement filter">
+          {(["all", "located", "page_level", "manual"] as PlacementFilter[]).map((placement) => (
+            <button
+              type="button"
+              key={placement}
+              className={placementFilter === placement ? "active" : ""}
+              onClick={() => setPlacementFilter(placement)}
+              title="Filter findings by placement quality"
+            >
+              {placementFilterLabel(placement)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="bulk-actions" aria-label="Bulk finding actions">
+        <span>{filteredFindings.length} in view</span>
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={filteredFindings.length === 0}
+          onClick={() => void onBulkPatchFindings(filteredFindings, { status: "accepted" })}
+          title="Mark all currently filtered findings as accepted"
+        >
+          Accept view
+        </button>
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={filteredFindings.length === 0}
+          onClick={() => void onBulkPatchFindings(filteredFindings, { status: "needs_review" })}
+          title="Return all currently filtered findings to needs review"
+        >
+          Review view
+        </button>
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={filteredFindings.length === 0}
+          onClick={() => void onBulkPatchFindings(filteredFindings, { status: "rejected" })}
+          title="Mark all currently filtered findings as rejected or not applicable"
+        >
+          Reject view
+        </button>
       </div>
 
       <div className="finding-list" aria-label="Finding list">
         {!selectedProject ? (
           <div className="empty-state compact">
             <FolderOpen size={18} />
-            <span>No project selected</span>
+            <strong>No project selected</strong>
+            <small>Select a review before filtering or editing AI findings.</small>
+          </div>
+        ) : findings.length === 0 ? (
+          <div className="empty-state compact">
+            <ClipboardCheck size={18} />
+            <strong>No AI findings imported yet</strong>
+            <small>Use Review, then Chat Prompt, then preview and import the AI update JSON.</small>
           </div>
         ) : filteredFindings.length === 0 ? (
           <div className="empty-state compact">
-            <ClipboardCheck size={18} />
-            <span>No findings match</span>
+            <Search size={18} />
+            <strong>No findings match</strong>
+            <small>{hasActiveFindingFilters ? "Clear the search or switch the status filter to All." : "No findings are available in this view."}</small>
           </div>
         ) : (
           filteredFindings.map((finding) => {
@@ -802,34 +3262,35 @@ function FindingsPanel({
             return (
               <button
                 key={finding.id}
+                ref={(node) => {
+                  findingButtonRefs.current[finding.id] = node;
+                }}
                 type="button"
                 className={`finding-item ${finding.id === selectedFinding?.id ? "selected" : ""}`}
                 onClick={() => onSelectFinding(finding)}
+                title={`Open finding: ${finding.title}`}
               >
                 <span className={`severity-dot severity-${severityClass(finding.severity)}`} />
                 <span className="finding-item-main">
                   <strong>{finding.title}</strong>
                   <span>
-                    {sheet ? `P${sheet.page_number}` : "Project"} | {finding.category}
+                    AI | {sheet ? `P${sheet.page_number}` : "Project"} | {finding.category}
                   </span>
                 </span>
                 <span className={`status-chip status-${statusClass(finding.status)}`}>
                   {formatStatus(finding.status)}
                 </span>
+                {finding.placement_status ? (
+                  <span className={`placement-chip placement-${statusClass(finding.placement_status)}`}>
+                    {placementLabel(finding.placement_status)}
+                  </span>
+                ) : null}
               </button>
             );
           })
         )}
       </div>
 
-      <FindingInspector
-        finding={selectedFinding}
-        sheet={selectedFinding ? getFindingSheet(selectedFinding, sheets) : undefined}
-        saving={selectedFinding ? savingFindingId === selectedFinding.id : false}
-        deleting={selectedFinding ? deletingFindingId === selectedFinding.id : false}
-        onPatchFinding={onPatchFinding}
-        onDeleteFinding={onDeleteFinding}
-      />
     </section>
   );
 }
@@ -843,31 +3304,68 @@ function StatusCounter({ label, value }: { label: string; value: number }) {
   );
 }
 
+function placementLabel(status?: string | null): string {
+  if (status === "exact_target_found") {
+    return "Placed";
+  }
+  if (status === "fuzzy_target_found") {
+    return "Fuzzy placed";
+  }
+  if (status === "page_level_fallback") {
+    return "Page note";
+  }
+  if (status === "manual_placement_needed") {
+    return "Needs manual placement";
+  }
+  return "Placement unknown";
+}
+
+function targetTextFromFinding(finding: Finding): string {
+  for (const item of finding.evidence ?? []) {
+    const value = item.target_text || item.markup_text || item.text_excerpt;
+    if (value?.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
 interface FindingInspectorProps {
   finding: Finding | null;
+  findings: Finding[];
   sheet?: Sheet;
   saving: boolean;
   deleting: boolean;
+  merging: boolean;
   onPatchFinding: (findingId: string, update: FindingUpdate) => Promise<void>;
   onDeleteFinding: (finding: Finding) => Promise<void>;
+  onMergeFinding: (finding: Finding, targetFindingId: string) => Promise<void>;
 }
 
 function FindingInspector({
   finding,
+  findings,
   sheet,
   saving,
   deleting,
+  merging,
   onPatchFinding,
   onDeleteFinding,
+  onMergeFinding,
 }: FindingInspectorProps) {
   const [draft, setDraft] = useState({
     title: "",
     category: CATEGORIES[0],
     severity: "Major" as Severity,
+    status: "needs_review" as FindingStatus,
     confidence: 0.75,
+    page_number: 1,
+    target_text: "",
     comment_text: "",
     reasoning_summary: "",
     suggested_correction: "",
+    reviewer_note: "",
+    merge_target_id: "",
   });
 
   useEffect(() => {
@@ -879,10 +3377,15 @@ function FindingInspector({
       title: finding.title,
       category: finding.category,
       severity: finding.severity,
+      status: finding.status,
       confidence: finding.confidence,
+      page_number: finding.page_number ?? 1,
+      target_text: targetTextFromFinding(finding),
       comment_text: finding.comment_text,
       reasoning_summary: finding.reasoning_summary,
       suggested_correction: finding.suggested_correction,
+      reviewer_note: finding.reviewer_note ?? "",
+      merge_target_id: "",
     });
   }, [finding]);
 
@@ -899,10 +3402,18 @@ function FindingInspector({
     ? CATEGORIES
     : [draft.category, ...CATEGORIES];
   const activeFinding = finding;
+  const titleIsMissing = draft.title.trim().length === 0;
+  const commentIsMissing = draft.comment_text.trim().length === 0;
+  const saveDisabled = saving || titleIsMissing || commentIsMissing;
+  const mergeTargets = findings.filter((candidate) => candidate.id !== finding.id && candidate.source === "ai");
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void onPatchFinding(activeFinding.id, draft);
+    if (saveDisabled) {
+      return;
+    }
+    const { merge_target_id: _mergeTargetId, ...findingDraft } = draft;
+    void onPatchFinding(activeFinding.id, findingDraft);
   }
 
   return (
@@ -912,15 +3423,23 @@ function FindingInspector({
           <span className="eyebrow">Inspector</span>
           <h3>{sheet ? sheetLabel(sheet) : "Project finding"}</h3>
         </div>
-        <span className={`status-chip status-${statusClass(finding.status)}`}>
-          {formatStatus(finding.status)}
-        </span>
+        <div className="inspector-badges">
+          <span className={`status-chip status-${statusClass(finding.status)}`}>
+            {formatStatus(finding.status)}
+          </span>
+          {finding.placement_status ? (
+            <span className={`placement-chip placement-${statusClass(finding.placement_status)}`}>
+              {placementLabel(finding.placement_status)}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       <label className="field-label">
         Title
         <input
           type="text"
+          title="Edit the finding title shown in the QC log and exports"
           value={draft.title}
           onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
         />
@@ -928,8 +3447,26 @@ function FindingInspector({
 
       <div className="field-grid">
         <label className="field-label">
+          Status
+          <select
+            title="Set the reviewer disposition for this AI finding"
+            value={draft.status}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, status: event.target.value as FindingStatus }))
+            }
+          >
+            {STATUSES.map((status) => (
+              <option key={status} value={status}>
+                {formatStatus(status)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field-label">
           Severity
           <select
+            title="Set how serious this finding is before saving or exporting"
             value={draft.severity}
             onChange={(event) =>
               setDraft((current) => ({ ...current, severity: event.target.value as Severity }))
@@ -942,10 +3479,26 @@ function FindingInspector({
             ))}
           </select>
         </label>
+      </div>
+
+      <div className="field-grid">
+        <label className="field-label">
+          Page
+          <input
+            type="number"
+            min="1"
+            title="Change the PDF page used for markup placement and export"
+            value={draft.page_number}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, page_number: Math.max(1, Number(event.target.value) || 1) }))
+            }
+          />
+        </label>
 
         <label className="field-label">
           Category
           <select
+            title="Classify the finding so exported logs can be sorted and filtered"
             value={draft.category}
             onChange={(event) =>
               setDraft((current) => ({ ...current, category: event.target.value }))
@@ -960,9 +3513,48 @@ function FindingInspector({
         </label>
       </div>
 
+      <label className="field-label confidence-field">
+        Confidence
+        <div className="confidence-control">
+          <input
+            type="range"
+            title="Adjust how confident AutoQC or the reviewer is in this finding"
+            min="0.05"
+            max="0.98"
+            step="0.01"
+            value={draft.confidence}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, confidence: Number(event.target.value) }))
+            }
+          />
+          <span>{confidenceLabel(draft.confidence)}</span>
+        </div>
+      </label>
+
+      <details className="collapsible-section inspector-collapsible">
+        <summary>
+          <span>
+            <strong>Markup target text</strong>
+            <small>{draft.target_text ? "Text search target saved" : "No target text"}</small>
+          </span>
+        </summary>
+        <label className="field-label">
+          Target text / evidence
+          <textarea
+            title="Exact text AutoQC should search for when placing the PDF markup"
+            value={draft.target_text}
+            rows={2}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, target_text: event.target.value }))
+            }
+          />
+        </label>
+      </details>
+
       <label className="field-label">
-        PDF comment
+        Final PDF comment
         <textarea
+          title="This is the comment that will appear in the marked PDF and review exports"
           value={draft.comment_text}
           rows={3}
           onChange={(event) =>
@@ -972,8 +3564,9 @@ function FindingInspector({
       </label>
 
       <label className="field-label">
-        Suggested correction
+        Required update
         <textarea
+          title="Describe what the drafter or reviewer should change to close this finding"
           value={draft.suggested_correction}
           rows={3}
           onChange={(event) =>
@@ -982,47 +3575,148 @@ function FindingInspector({
         />
       </label>
 
-      <label className="field-label">
-        Reasoning
-        <textarea
-          value={draft.reasoning_summary}
-          rows={4}
-          onChange={(event) =>
-            setDraft((current) => ({ ...current, reasoning_summary: event.target.value }))
-          }
-        />
-      </label>
-
-      <div className="finding-details">
-        <span>
-          <strong>Confidence</strong> {confidenceLabel(draft.confidence)}
-        </span>
-        <span>
-          <strong>Source</strong> {finding.source || "unknown"}
-        </span>
-        {finding.stable_id ? (
+      <details className="collapsible-section inspector-collapsible">
+        <summary>
           <span>
-            <strong>ID</strong> {finding.stable_id}
+            <strong>Rationale, reviewer note, and evidence</strong>
+            <small>{finding.evidence?.length ? `${finding.evidence.length} evidence item${finding.evidence.length === 1 ? "" : "s"}` : "Collapsed details"}</small>
           </span>
-        ) : null}
-      </div>
+        </summary>
+        <label className="field-label">
+          Rationale
+          <textarea
+            title="Document why this finding exists and what evidence supports it"
+            value={draft.reasoning_summary}
+            rows={4}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, reasoning_summary: event.target.value }))
+            }
+          />
+        </label>
 
-      {finding.evidence?.length ? (
-        <div className="evidence-list">
-          <strong>Evidence</strong>
-          {finding.evidence.map((item, index) => (
-            <div className="evidence-item" key={`${finding.id}-${index}`}>
-              <span>{item.observation || item.text_excerpt || "Evidence item"}</span>
-              <small>
-                {item.drawing_number || (item.page_number ? `Page ${item.page_number}` : "Project")}
-              </small>
-            </div>
-          ))}
+        <label className="field-label">
+          Reviewer note
+          <textarea
+            title="Internal reviewer note for audit/debugging; it is included in the QA report"
+            value={draft.reviewer_note}
+            rows={3}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, reviewer_note: event.target.value }))
+            }
+          />
+        </label>
+
+        <div className="finding-details">
+          <span>
+            <strong>Confidence</strong> {confidenceLabel(draft.confidence)}
+          </span>
+          <span>
+            <strong>Source</strong> {finding.source === "ai" ? "AI-sourced finding" : finding.source || "unknown"}
+          </span>
+          <span>
+            <strong>Placement</strong> {placementLabel(finding.placement_status)}
+          </span>
+          {finding.ai_batch_id ? (
+            <span>
+              <strong>AI batch</strong> {finding.ai_batch_id}
+            </span>
+          ) : null}
+          {finding.prompt_version ? (
+            <span>
+              <strong>Prompt</strong> {finding.prompt_version}
+            </span>
+          ) : null}
+          {finding.stable_id ? (
+            <span>
+              <strong>ID</strong> {finding.stable_id}
+            </span>
+          ) : null}
+        </div>
+
+        {finding.evidence?.length ? (
+          <div className="evidence-list">
+            <strong>Evidence</strong>
+            {finding.evidence.map((item, index) => (
+              <div className="evidence-item" key={`${finding.id}-${index}`}>
+                <span>{item.observation || item.text_excerpt || "Evidence item"}</span>
+                <small>
+                  {item.drawing_number || (item.page_number ? `Page ${item.page_number}` : "Project")}
+                </small>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </details>
+
+      <details className="collapsible-section inspector-collapsible">
+        <summary>
+          <span>
+            <strong>Duplicate / merge</strong>
+            <small>{finding.duplicate_of ? "Duplicate link saved" : "Optional dedupe tools"}</small>
+          </span>
+        </summary>
+        <div className="dedupe-tools">
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={saving || finding.status === "duplicate"}
+            onClick={() => void onPatchFinding(finding.id, { status: "duplicate" })}
+            title="Mark this finding as a duplicate and hide it from accepted-only exports"
+          >
+            <History size={16} />
+            Mark as duplicate
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={saving || finding.status === "duplicate"}
+            onClick={() => void onPatchFinding(finding.id, { status: "duplicate" })}
+            title="Hide this duplicate from normal export selections by setting status to Duplicate"
+          >
+            <ShieldCheck size={16} />
+            Hide duplicate from export
+          </button>
+          <label className="field-label">
+            Merge into selected finding
+            <select
+              value={draft.merge_target_id}
+              onChange={(event) => setDraft((current) => ({ ...current, merge_target_id: event.target.value }))}
+              title="Choose the finding that should receive this duplicate's evidence"
+            >
+              <option value="">Choose target finding</option>
+              {mergeTargets.map((target) => (
+                <option key={target.id} value={target.id}>
+                  {target.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!draft.merge_target_id || merging}
+            onClick={() => void onMergeFinding(finding, draft.merge_target_id)}
+            title="Preserve this finding as duplicate and merge its evidence into the selected target"
+          >
+            {merging ? <Loader2 size={16} className="spin" /> : <Archive size={16} />}
+            Merge
+          </button>
+        </div>
+      </details>
+
+      {titleIsMissing || commentIsMissing ? (
+        <div className="inline-warning" role="alert">
+          Add a title and final PDF comment before saving. These fields keep the findings log and marked PDF readable.
         </div>
       ) : null}
 
       <div className="inspector-actions">
-        <button className="primary-button" type="submit" disabled={saving}>
+        <button
+          className="primary-button"
+          type="submit"
+          disabled={saveDisabled}
+          title={saveDisabled ? "Add a title and final PDF comment before saving" : "Save title, severity, category, confidence, comments, correction, and reasoning edits"}
+        >
           {saving ? <Loader2 size={17} className="spin" /> : <Save size={17} />}
           Save
         </button>
@@ -1031,6 +3725,7 @@ function FindingInspector({
           type="button"
           disabled={saving}
           onClick={() => void onPatchFinding(finding.id, { status: "accepted" })}
+          title="Mark this finding as valid and include it in accepted exports"
         >
           <Check size={17} />
           Accept
@@ -1040,6 +3735,7 @@ function FindingInspector({
           type="button"
           disabled={saving}
           onClick={() => void onPatchFinding(finding.id, { status: "needs_review" })}
+          title="Keep this finding open for more review"
         >
           <ClipboardCheck size={17} />
           Review
@@ -1049,6 +3745,7 @@ function FindingInspector({
           type="button"
           disabled={saving}
           onClick={() => void onPatchFinding(finding.id, { status: "rejected" })}
+          title="Mark this finding as not applicable or not a real issue"
         >
           <X size={17} />
           Reject
@@ -1058,6 +3755,7 @@ function FindingInspector({
           type="button"
           disabled={deleting}
           onClick={() => void onDeleteFinding(finding)}
+          title="Permanently remove this finding from the project after confirmation"
         >
           {deleting ? <Loader2 size={17} className="spin" /> : <Trash2 size={17} />}
           Delete
@@ -1070,9 +3768,11 @@ function FindingInspector({
 interface ExportPanelProps {
   project: Project | null;
   findings: Finding[];
+  events: FindingEvent[];
+  onExportComplete?: (response: ExportResponse) => Promise<void>;
 }
 
-function ExportPanel({ project, findings }: ExportPanelProps) {
+function ExportPanel({ project, findings, events, onExportComplete }: ExportPanelProps) {
   const [statuses, setStatuses] = useState<FindingStatus[]>(["accepted"]);
   const [exporting, setExporting] = useState(false);
   const [result, setResult] = useState<ExportResponse | null>(null);
@@ -1100,6 +3800,7 @@ function ExportPanel({ project, findings }: ExportPanelProps) {
     try {
       const response = await exportProject(project.id, { statuses });
       setResult(response);
+      await onExportComplete?.(response);
     } catch (requestError) {
       setError(getApiErrorMessage(requestError));
     } finally {
@@ -1109,14 +3810,23 @@ function ExportPanel({ project, findings }: ExportPanelProps) {
 
   const outputRows = result
     ? [
-        ["Marked PDF", result.marked_pdf],
-        ["QC log", result.csv_log],
-        ["Excel log", result.excel_log],
-        ["JSON findings", result.json_findings],
-        ["Markdown", result.markdown_summary],
-        ["HTML", result.html_summary],
-      ].filter(([, value]) => Boolean(value))
+        { label: "Marked PDF", value: result.marked_pdf },
+        { label: "QA report", value: result.qa_report ?? result.csv_log },
+        { label: "Excel log", value: result.excel_log },
+        { label: "JSON findings", value: result.json_findings },
+        { label: "Markdown", value: result.markdown_summary },
+        { label: "HTML", value: result.html_summary },
+      ].filter((row): row is { label: string; value: string } => Boolean(row.value))
     : [];
+  const selectedFindingCount = findings.filter((finding) => statuses.includes(finding.status)).length;
+  const exportDisabled = !project || statuses.length === 0 || selectedFindingCount === 0 || exporting;
+  const exportTitle = !project
+    ? "Select a project before exporting"
+    : statuses.length === 0
+      ? "Choose at least one finding status to export"
+      : selectedFindingCount === 0
+        ? "No findings match the selected export statuses"
+        : "Generate marked PDF, logs, and summaries for the selected finding statuses";
 
   return (
     <section className="panel export-panel">
@@ -1130,7 +3840,11 @@ function ExportPanel({ project, findings }: ExportPanelProps) {
 
       <div className="export-counts">
         {STATUSES.map((status) => (
-          <label className="checkbox-row" key={status}>
+          <label
+            className="checkbox-row"
+            key={status}
+            title={`Include ${formatStatus(status).toLowerCase()} findings in the generated review package`}
+          >
             <input
               type="checkbox"
               checked={statuses.includes(status)}
@@ -1142,28 +3856,103 @@ function ExportPanel({ project, findings }: ExportPanelProps) {
         ))}
       </div>
 
+      <div className="export-helper" role="status">
+        {project ? `${selectedFindingCount} finding${selectedFindingCount === 1 ? "" : "s"} selected for export.` : "Select a project to prepare exports."}
+      </div>
+
+      {project && statuses.length > 0 && selectedFindingCount === 0 ? (
+        <div className="inline-warning" role="alert">
+          No findings match the selected status filters. Choose another status or update findings before exporting.
+        </div>
+      ) : null}
+
       <button
         className="primary-button full-width"
         type="button"
-        disabled={!project || statuses.length === 0 || exporting}
+        disabled={exportDisabled}
         onClick={() => void handleExport()}
+        title={exportTitle}
       >
         {exporting ? <Loader2 size={17} className="spin" /> : <Download size={17} />}
         Export
       </button>
 
-      {error ? <div className="inline-error">{error}</div> : null}
+      {error ? <div className="inline-error" role="alert">{error}</div> : null}
+
+      {result?.placement_summary ? (
+        <div className="export-placement-summary" role="status">
+          <strong>Export placement</strong>
+          <span>{placementSummaryText(result.placement_summary)}</span>
+        </div>
+      ) : null}
+
+      {result?.validation ? (
+        <div className={`export-validation validation-${statusClass(result.validation.status)}`} role={result.validation.status === "failed" ? "alert" : "status"}>
+          <strong>Validation {validationStatusLabel(result.validation.status)}</strong>
+          <span>
+            {result.validation.annotation_count ?? 0} annotation{result.validation.annotation_count === 1 ? "" : "s"} | {result.validation.marked_page_count ?? "?"}/{result.validation.source_page_count ?? "?"} pages
+          </span>
+          {result.validation.errors?.slice(0, 2).map((item) => <small key={item}>{item}</small>)}
+          {result.validation.warnings?.slice(0, 2).map((item) => <small key={item}>{item}</small>)}
+        </div>
+      ) : null}
+
+      {result?.marked_pdf ? (
+        <a
+          className="download-pdf-button"
+          href={resolveAssetUrl(result.marked_pdf) ?? result.marked_pdf}
+          download
+          target="_blank"
+          rel="noreferrer"
+          title="Download the marked-up PDF with AutoQC note comments"
+        >
+          <Download size={20} />
+          Download Marked PDF
+        </a>
+      ) : null}
 
       {result ? (
-        <div className="output-list">
-          <strong>Generated files</strong>
-          {outputRows.map(([label, value]) => (
-            <div className="output-row" key={label ?? String(value)}>
-              <span>{label}</span>
-              <code>{value}</code>
+        <details className="output-list collapsible-section">
+          <summary>
+            <span>
+              <strong>Generated files</strong>
+              <small>{typeof result.findings_exported === "number" ? `${result.findings_exported} findings exported` : `${outputRows.length} files`}</small>
+            </span>
+          </summary>
+          {outputRows.map((row) => {
+            const href = resolveAssetUrl(row.value);
+            return (
+              <div className="output-row" key={row.label}>
+                <div className="output-row-header">
+                  <span>{row.label}</span>
+                  {href ? (
+                    <a href={href} target="_blank" rel="noreferrer" title={`Open generated ${row.label.toLowerCase()}`}>
+                      Open
+                    </a>
+                  ) : null}
+                </div>
+                <code>{row.value}</code>
+              </div>
+            );
+          })}
+        </details>
+      ) : null}
+
+      {events.length > 0 ? (
+        <details className="audit-list collapsible-section">
+          <summary>
+            <span>
+              <strong>Recent audit activity</strong>
+              <small>{events.length} event{events.length === 1 ? "" : "s"}</small>
+            </span>
+          </summary>
+          {events.slice(0, 5).map((event) => (
+            <div className="audit-row" key={event.id}>
+              <span>{formatStatus(event.action.replace(/_/g, " "))}</span>
+              <small>{formatDate(event.created_at)}</small>
             </div>
           ))}
-        </div>
+        </details>
       ) : null}
     </section>
   );
@@ -1177,47 +3966,310 @@ function findingMatchesSheet(finding: Finding, sheet: Sheet): boolean {
   return Boolean(finding.page_number && finding.page_number === sheet.page_number);
 }
 
-function getOverlayRect(
+function extractRectArray(value: unknown): number[] | null {
+  if (!Array.isArray(value) || value.length < 4) {
+    return null;
+  }
+
+  const coordinates = value.slice(0, 4).map((coordinate) => Number(coordinate));
+  if (coordinates.some((coordinate) => !Number.isFinite(coordinate))) {
+    return null;
+  }
+
+  return [
+    Math.min(coordinates[0], coordinates[2]),
+    Math.min(coordinates[1], coordinates[3]),
+    Math.max(coordinates[0], coordinates[2]),
+    Math.max(coordinates[1], coordinates[3]),
+  ];
+}
+
+function extractPlacementBbox(placementDetails: Record<string, unknown> | null | undefined): number[] | null {
+  if (!placementDetails || typeof placementDetails !== "object" || Array.isArray(placementDetails)) {
+    return null;
+  }
+
+  return extractRectArray(placementDetails.rect_json);
+}
+
+function extractPlacementDisplayBbox(placementDetails: Record<string, unknown> | null | undefined): number[] | null {
+  if (!placementDetails || typeof placementDetails !== "object" || Array.isArray(placementDetails)) {
+    return null;
+  }
+
+  return extractRectArray(placementDetails.display_rect_json);
+}
+
+function numericDetail(placementDetails: Record<string, unknown> | null | undefined, key: string): number | null {
+  if (!placementDetails || typeof placementDetails !== "object" || Array.isArray(placementDetails)) {
+    return null;
+  }
+  const value = Number(placementDetails[key]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function normalizedRotation(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  const rotation = ((Math.round(numeric / 90) * 90) % 360 + 360) % 360;
+  return rotation === 90 || rotation === 180 || rotation === 270 ? rotation : 0;
+}
+
+function sheetDisplayRotation(sheet: Sheet, placementDetails: Record<string, unknown> | null | undefined): number {
+  return normalizedRotation(numericDetail(placementDetails, "page_rotation") ?? sheet.rotation ?? 0);
+}
+
+function rotateBboxForDisplay(
+  bbox: number[],
+  rotation: number,
+  coordinateWidth: number,
+  coordinateHeight: number,
+): number[] {
+  if (rotation === 0) {
+    return bbox;
+  }
+
+  const corners = [
+    [bbox[0], bbox[1]],
+    [bbox[2], bbox[1]],
+    [bbox[2], bbox[3]],
+    [bbox[0], bbox[3]],
+  ];
+  const transformed = corners.map(([x, y]) => {
+    if (rotation === 90) {
+      return [coordinateHeight - y, x];
+    }
+    if (rotation === 180) {
+      return [coordinateWidth - x, coordinateHeight - y];
+    }
+    return [y, coordinateWidth - x];
+  });
+  const xs = transformed.map(([x]) => x);
+  const ys = transformed.map(([, y]) => y);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+function getOverlayBoxPercent(
   finding: Finding,
   sheet: Sheet,
   imageSize: ImageSize | null,
-): CSSProperties | null {
-  const bbox = extractBbox(finding.location);
+): OverlayBoxPercent | null {
+  const locationBbox = extractBbox(finding.location);
+  const placementDisplayBbox = extractPlacementDisplayBbox(finding.placement_details);
+  const placementBbox = extractPlacementBbox(finding.placement_details);
+  const bbox = locationBbox ?? placementDisplayBbox ?? placementBbox;
   if (!bbox) {
     return null;
   }
 
   const [rawX0, rawY0, rawX1, rawY1] = bbox;
   const normalized = bbox.every((coordinate) => coordinate >= 0 && coordinate <= 1);
-  const sourceWidth = sheet.width ?? imageSize?.width ?? null;
-  const sourceHeight = sheet.height ?? imageSize?.height ?? null;
+  const displayWidth = sheet.width ?? imageSize?.width ?? null;
+  const displayHeight = sheet.height ?? imageSize?.height ?? null;
 
   if (normalized) {
     return {
-      left: `${clamp(rawX0 * 100, 0, 100)}%`,
-      top: `${clamp(rawY0 * 100, 0, 100)}%`,
-      width: `${clamp((rawX1 - rawX0) * 100, 0.6, 100)}%`,
-      height: `${clamp((rawY1 - rawY0) * 100, 0.6, 100)}%`,
+      left: clamp(rawX0 * 100, 0, 100),
+      top: clamp(rawY0 * 100, 0, 100),
+      width: clamp((rawX1 - rawX0) * 100, 0.6, 100),
+      height: clamp((rawY1 - rawY0) * 100, 0.6, 100),
     };
   }
 
-  if (!sourceWidth || !sourceHeight) {
+  if (!displayWidth || !displayHeight) {
     return null;
   }
+
+  const bboxIsAlreadyDisplaySpace = !locationBbox && Boolean(placementDisplayBbox);
+  const rotation = bboxIsAlreadyDisplaySpace ? 0 : sheetDisplayRotation(sheet, finding.placement_details);
+  const coordinateWidth = numericDetail(finding.placement_details, "source_width")
+    ?? sheet.source_width
+    ?? (rotation === 90 || rotation === 270 ? displayHeight : displayWidth);
+  const coordinateHeight = numericDetail(finding.placement_details, "source_height")
+    ?? sheet.source_height
+    ?? (rotation === 90 || rotation === 270 ? displayWidth : displayHeight);
 
   const origin = typeof finding.location === "object" && !Array.isArray(finding.location)
     ? finding.location?.origin
     : "top_left";
 
-  const y0 = origin === "bottom_left" ? sourceHeight - rawY1 : rawY0;
-  const y1 = origin === "bottom_left" ? sourceHeight - rawY0 : rawY1;
+  const y0 = origin === "bottom_left" ? coordinateHeight - rawY1 : rawY0;
+  const y1 = origin === "bottom_left" ? coordinateHeight - rawY0 : rawY1;
+  const displayBbox = rotateBboxForDisplay([rawX0, y0, rawX1, y1], rotation, coordinateWidth, coordinateHeight);
+  const [displayX0, displayY0, displayX1, displayY1] = displayBbox;
 
   return {
-    left: `${clamp((rawX0 / sourceWidth) * 100, 0, 100)}%`,
-    top: `${clamp((y0 / sourceHeight) * 100, 0, 100)}%`,
-    width: `${clamp(((rawX1 - rawX0) / sourceWidth) * 100, 0.6, 100)}%`,
-    height: `${clamp(((y1 - y0) / sourceHeight) * 100, 0.6, 100)}%`,
+    left: clamp((displayX0 / displayWidth) * 100, 0, 100),
+    top: clamp((displayY0 / displayHeight) * 100, 0, 100),
+    width: clamp(((displayX1 - displayX0) / displayWidth) * 100, 0.6, 100),
+    height: clamp(((displayY1 - displayY0) / displayHeight) * 100, 0.6, 100),
   };
+}
+
+function getOverlayRect(
+  finding: Finding,
+  sheet: Sheet,
+  imageSize: ImageSize | null,
+): CSSProperties | null {
+  const box = getOverlayBoxPercent(finding, sheet, imageSize);
+  if (!box) {
+    return null;
+  }
+
+  return {
+    left: `${box.left}%`,
+    top: `${box.top}%`,
+    width: `${box.width}%`,
+    height: `${box.height}%`,
+  };
+}
+
+function nextUnreviewedFinding(findings: Finding[], currentId: string): Finding | null {
+  const currentIndex = Math.max(0, findings.findIndex((finding) => finding.id === currentId));
+  const ordered = [...findings.slice(currentIndex + 1), ...findings.slice(0, currentIndex + 1)];
+  return ordered.find((finding) => finding.status === "needs_review" && finding.id !== currentId) ?? null;
+}
+
+function findingPlacementStatus(finding: Finding): string {
+  const hasBox = extractPlacementBbox(finding.placement_details) || extractBbox(finding.location);
+  return String(finding.placement_status || finding.placement_details?.placement_status || (hasBox ? "exact_target_found" : "manual_placement_needed"));
+}
+
+function matchesPlacementFilter(finding: Finding, filter: PlacementFilter): boolean {
+  if (filter === "all") {
+    return true;
+  }
+  const status = findingPlacementStatus(finding);
+  if (filter === "located") {
+    return status === "exact_target_found" || status === "fuzzy_target_found";
+  }
+  if (filter === "page_level") {
+    return status === "page_level_fallback";
+  }
+  return status === "manual_placement_needed";
+}
+
+function placementFilterLabel(filter: PlacementFilter): string {
+  return {
+    all: "All placement",
+    located: "Located",
+    page_level: "Page-level",
+    manual: "Manual",
+  }[filter];
+}
+
+function computePlacementSummary(findings: Finding[]): PlacementSummary {
+  const summary: PlacementSummary = {
+    exact_target_found: 0,
+    fuzzy_target_found: 0,
+    page_level_fallback: 0,
+    manual_placement_needed: 0,
+  };
+  for (const finding of findings) {
+    const status = findingPlacementStatus(finding);
+    summary[status] = (summary[status] ?? 0) + 1;
+  }
+  return summary;
+}
+
+function placementQualityLabel(status: string): string {
+  return {
+    exact_target_found: "Exact target found",
+    fuzzy_target_found: "Fuzzy target found",
+    page_level_fallback: "Page-level finding",
+    manual_placement_needed: "Manual placement needed",
+  }[status] ?? formatStatus(status);
+}
+
+function validationStatusLabel(status: string): string {
+  if (status === "passed") {
+    return "Passed";
+  }
+  if (status === "warning") {
+    return "Warning";
+  }
+  if (status === "failed") {
+    return "Failed";
+  }
+  return formatStatus(status);
+}
+
+function placementSummaryText(summary: PlacementSummary): string {
+  const exact = summary.exact_target_found ?? 0;
+  const fuzzy = summary.fuzzy_target_found ?? 0;
+  const page = summary.page_level_fallback ?? 0;
+  const manual = summary.manual_placement_needed ?? 0;
+  return `Placement: ${exact} exact, ${fuzzy} fuzzy, ${page} page-level, ${manual} manual.`;
+}
+
+function humanAuditAction(event: FindingEvent): string {
+  const labels: Record<string, string> = {
+    ai_import_previewed: "AI import preview created",
+    ai_import_failed: "AI import preview failed",
+    ai_import_imported: "AI updates imported",
+    ai_import_batch_rolled_back: "AI import batch rolled back",
+    ai_import_batch_rollback_removed_finding: "Imported finding removed by rollback",
+    finding_edit: "Finding edited",
+    status_change: "Finding status changed",
+    bulk_update: "Bulk status change",
+    bulk_status_rollback: "Bulk status rollback",
+    placement_recalculated: "Placement recalculated",
+    export_created: "Review package exported",
+    delete: "Finding deleted",
+    finding_marked_duplicate: "Finding marked as duplicate",
+    finding_merged_duplicate_evidence: "Duplicate evidence merged",
+    manual_ai_prompt_generated: "Chat Prompt generated",
+    project_package_exported: "Project package exported",
+    project_package_imported: "Project package imported",
+  };
+  return labels[event.action] ?? formatStatus(event.action.replace(/_/g, " "));
+}
+
+function auditChangeSummary(changes: Record<string, unknown>): string {
+  const parts = Object.entries(changes)
+    .slice(0, 5)
+    .map(([key, value]) => {
+      if (typeof value === "object" && value && "from" in value && "to" in value) {
+        const typed = value as { from?: unknown; to?: unknown };
+        return `${key}: ${String(typed.from ?? "")} -> ${String(typed.to ?? "")}`;
+      }
+      if (Array.isArray(value)) {
+        return `${key}: ${value.length} item${value.length === 1 ? "" : "s"}`;
+      }
+      if (typeof value === "object" && value) {
+        return `${key}: ${JSON.stringify(value)}`;
+      }
+      return `${key}: ${String(value ?? "")}`;
+    });
+  return parts.join(" | ");
+}
+
+function normalizeAIProvider(value?: string | null): "openai" | "deepseek" | null {
+  const normalized = (value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (normalized === "openai" || normalized === "openaicompatible") {
+    return "openai";
+  }
+  if (normalized === "deepseek" || normalized === "deepseekai") {
+    return "deepseek";
+  }
+  return null;
+}
+
+function formatAIProvider(value?: string | null): string {
+  const provider = normalizeAIProvider(value) || "openai";
+  return provider === "deepseek" ? "DeepSeek" : "OpenAI";
+}
+
+function strongAIModelExamples(provider: "openai" | "deepseek"): string {
+  return provider === "deepseek"
+    ? "deepseek-reasoner for deeper review, or deepseek-chat for faster review"
+    : "gpt-5.5-thinking for deep review, or gpt-5.5-pro if available on your account";
+}
+
+function defaultAIModelForProvider(provider: "openai" | "deepseek"): string {
+  return provider === "deepseek" ? "deepseek-reasoner" : "gpt-5.5-thinking";
 }
 
 function clamp(value: number, min: number, max: number): number {

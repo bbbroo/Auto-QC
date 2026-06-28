@@ -1,9 +1,29 @@
 import type {
+  AIReviewResponse,
+  AIPreviewResponse,
+  AIImportBatch,
+  AIStatus,
+  AISettingsRequest,
+  BatchRollbackPreview,
+  BulkFindingResponse,
   ExportRequest,
   ExportResponse,
   Finding,
+  FindingEvent,
   FindingUpdate,
+  MarkupMemoryPreview,
+  MarkupMemoryRebuildResponse,
+  MarkupMemorySettings,
+  MarkupMemorySettingsUpdate,
+  MarkupMemoryStats,
+  MergeFindingResponse,
+  ManualAIPromptResponse,
+  PlacementRecalculateResponse,
+  ProjectPackageExportResponse,
+  ProjectPackageImportResponse,
+  PromptTemplate,
   Project,
+  ReadinessResponse,
   Sheet,
 } from "./types";
 
@@ -73,7 +93,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     const message =
       typeof payload === "object" && payload && "detail" in payload
-        ? String((payload as { detail: unknown }).detail)
+        ? formatApiDetail((payload as { detail: unknown }).detail)
         : `Request failed with ${response.status}`;
     throw new ApiError(message, response.status, payload);
   }
@@ -142,6 +162,28 @@ export async function getProject(projectId: string): Promise<Project> {
   return unwrapItem<Project>(payload, "project");
 }
 
+export async function deleteProject(projectId: string): Promise<void> {
+  await request<unknown>(`/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function exportProjectPackage(projectId: string): Promise<ProjectPackageExportResponse> {
+  return request<ProjectPackageExportResponse>(`/projects/${encodeURIComponent(projectId)}/project-package`, {
+    method: "POST",
+  });
+}
+
+export async function importProjectPackage(file: File): Promise<ProjectPackageImportResponse> {
+  const body = new FormData();
+  body.append("file", file);
+  const payload = await request<unknown>("/project-packages/import", {
+    method: "POST",
+    body,
+  });
+  return payload as ProjectPackageImportResponse;
+}
+
 export async function listSheets(projectId: string): Promise<Sheet[]> {
   const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/sheets`);
   return unwrapCollection<Sheet>(payload, ["sheets", "items"]);
@@ -150,6 +192,108 @@ export async function listSheets(projectId: string): Promise<Sheet[]> {
 export async function listFindings(projectId: string): Promise<Finding[]> {
   const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/findings`);
   return unwrapCollection<Finding>(payload, ["findings", "items"]);
+}
+
+export async function listFindingEvents(projectId: string): Promise<FindingEvent[]> {
+  const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/events`);
+  return unwrapCollection<FindingEvent>(payload, ["events", "items"]);
+}
+
+export async function recalculateFindingPlacement(projectId: string): Promise<PlacementRecalculateResponse> {
+  return request<PlacementRecalculateResponse>(`/projects/${encodeURIComponent(projectId)}/findings/recalculate-placement`, {
+    method: "POST",
+  });
+}
+
+export async function getAIStatus(): Promise<AIStatus> {
+  const payload = await request<unknown>("/ai/status");
+  return unwrapItem<AIStatus>(payload, "status");
+}
+
+export async function saveAISettings(settings: AISettingsRequest): Promise<AIStatus> {
+  return request<AIStatus>("/ai/settings", {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+}
+
+export async function runAIReview(projectId: string): Promise<AIReviewResponse> {
+  const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/ai-review`, {
+    method: "POST",
+  });
+  return unwrapItem<AIReviewResponse>(payload, "result");
+}
+
+export async function getManualAIPrompt(projectId: string, templateId?: string | null): Promise<ManualAIPromptResponse> {
+  const query = templateId ? `?template_id=${encodeURIComponent(templateId)}` : "";
+  const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/ai-review/manual-prompt${query}`);
+  return payload as ManualAIPromptResponse;
+}
+
+export async function listPromptTemplates(): Promise<PromptTemplate[]> {
+  const payload = await request<unknown>("/ai-review/prompt-templates");
+  return unwrapCollection<PromptTemplate>(payload, ["templates", "items"]);
+}
+
+export async function importManualAIResponse(projectId: string, responseText: string): Promise<AIReviewResponse> {
+  const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/ai-review/import`, {
+    method: "POST",
+    body: JSON.stringify({ response_text: responseText }),
+  });
+  return unwrapItem<AIReviewResponse>(payload, "result");
+}
+
+export async function previewManualAIResponse(
+  projectId: string,
+  responseText: string,
+  promptVersion?: string | null,
+  promptId?: string | null,
+  sourceType = "manual_chat_prompt",
+): Promise<AIPreviewResponse> {
+  const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/ai-review/preview`, {
+    method: "POST",
+    body: JSON.stringify({
+      response_text: responseText,
+      source_type: sourceType,
+      prompt_version: promptVersion ?? undefined,
+      prompt_id: promptId ?? undefined,
+    }),
+  });
+  return payload as AIPreviewResponse;
+}
+
+export async function importManualAIPreview(projectId: string, previewId: string): Promise<AIReviewResponse> {
+  const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/ai-review/import`, {
+    method: "POST",
+    body: JSON.stringify({ preview_id: previewId }),
+  });
+  return unwrapItem<AIReviewResponse>(payload, "result");
+}
+
+export async function listAIImportBatches(projectId: string): Promise<AIImportBatch[]> {
+  const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/ai-review/import-batches`);
+  return unwrapCollection<AIImportBatch>(payload, ["batches", "items"]);
+}
+
+export async function previewImportBatchRollback(projectId: string, batchId: string): Promise<BatchRollbackPreview> {
+  return request<BatchRollbackPreview>(
+    `/projects/${encodeURIComponent(projectId)}/ai-review/import-batches/${encodeURIComponent(batchId)}/rollback-preview`,
+    { method: "POST" },
+  );
+}
+
+export async function rollbackImportBatch(projectId: string, batchId: string): Promise<BatchRollbackPreview> {
+  return request<BatchRollbackPreview>(
+    `/projects/${encodeURIComponent(projectId)}/ai-review/import-batches/${encodeURIComponent(batchId)}/rollback`,
+    { method: "POST", body: JSON.stringify({ confirm: true }) },
+  );
+}
+
+export async function rollbackLatestBulkStatus(projectId: string, confirm = false): Promise<unknown> {
+  return request<unknown>(`/projects/${encodeURIComponent(projectId)}/findings/bulk/rollback-latest-status`, {
+    method: "POST",
+    body: JSON.stringify({ confirm }),
+  });
 }
 
 export async function updateFinding(
@@ -164,10 +308,60 @@ export async function updateFinding(
   return unwrapItem<Finding>(payload, "finding");
 }
 
+export async function bulkUpdateFindings(
+  findingIds: string[],
+  update: FindingUpdate,
+): Promise<BulkFindingResponse> {
+  const payload = await request<unknown>("/findings/bulk", {
+    method: "PATCH",
+    body: JSON.stringify({ finding_ids: findingIds, update }),
+  });
+
+  return unwrapItem<BulkFindingResponse>(payload, "result");
+}
+
 export async function deleteFinding(findingId: string): Promise<void> {
   await request<unknown>(`/findings/${encodeURIComponent(findingId)}`, {
     method: "DELETE",
   });
+}
+
+export async function mergeFindingInto(findingId: string, targetFindingId: string): Promise<MergeFindingResponse> {
+  return request<MergeFindingResponse>(`/findings/${encodeURIComponent(findingId)}/merge`, {
+    method: "POST",
+    body: JSON.stringify({ target_finding_id: targetFindingId }),
+  });
+}
+
+export async function getMarkupMemorySettings(): Promise<MarkupMemorySettings> {
+  return request<MarkupMemorySettings>("/markup-memory/settings");
+}
+
+export async function updateMarkupMemorySettings(settings: MarkupMemorySettingsUpdate): Promise<MarkupMemorySettings> {
+  return request<MarkupMemorySettings>("/markup-memory/settings", {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+}
+
+export async function getMarkupMemoryStats(): Promise<MarkupMemoryStats> {
+  return request<MarkupMemoryStats>("/markup-memory/stats");
+}
+
+export async function rebuildMarkupMemory(): Promise<MarkupMemoryRebuildResponse> {
+  return request<MarkupMemoryRebuildResponse>("/markup-memory/rebuild", {
+    method: "POST",
+  });
+}
+
+export async function clearMarkupMemory(): Promise<{ deleted: number; stats: MarkupMemoryStats }> {
+  return request<{ deleted: number; stats: MarkupMemoryStats }>("/markup-memory", {
+    method: "DELETE",
+  });
+}
+
+export async function previewMarkupMemoryContext(projectId: string): Promise<MarkupMemoryPreview> {
+  return request<MarkupMemoryPreview>(`/projects/${encodeURIComponent(projectId)}/markup-memory/preview`);
 }
 
 export async function exportProject(
@@ -179,7 +373,78 @@ export async function exportProject(
     body: JSON.stringify(requestBody),
   });
 
-  return unwrapItem<ExportResponse>(payload, "export");
+  return normalizeExportResponse(payload);
+}
+
+function normalizeExportResponse(payload: unknown): ExportResponse {
+  if (typeof payload !== "object" || !payload) {
+    return { export_id: "unknown" };
+  }
+
+  const root = payload as Record<string, unknown>;
+  const exportRecord = typeof root.export === "object" && root.export
+    ? (root.export as Record<string, unknown>)
+    : root;
+  const files = typeof root.files === "object" && root.files
+    ? (root.files as Record<string, unknown>)
+    : root;
+
+  return {
+    export_id: String(exportRecord.id ?? root.export_id ?? "unknown"),
+    marked_pdf: stringOrNull(files.marked_pdf ?? exportRecord.marked_pdf_path),
+    csv_log: stringOrNull(files.csv ?? files.csv_log ?? exportRecord.csv_path),
+    qa_report: stringOrNull(files.qa_report ?? exportRecord.qa_report_path ?? files.csv ?? exportRecord.csv_path),
+    excel_log: stringOrNull(files.xlsx ?? files.excel_log ?? exportRecord.xlsx_path),
+    json_findings: stringOrNull(files.json ?? files.json_findings ?? exportRecord.json_path),
+    markdown_summary: stringOrNull(files.summary ?? files.markdown_summary ?? exportRecord.summary_path),
+    html_summary: stringOrNull(files.html ?? files.html_summary ?? exportRecord.html_path),
+    findings_exported: typeof root.findings_exported === "number" ? root.findings_exported : undefined,
+    placement_summary: typeof root.placement_summary === "object" && root.placement_summary
+      ? root.placement_summary as ExportResponse["placement_summary"]
+      : undefined,
+    validation: typeof root.validation === "object" && root.validation
+      ? root.validation as ExportResponse["validation"]
+      : undefined,
+  };
+}
+
+export async function getReadiness(): Promise<ReadinessResponse> {
+  return request<ReadinessResponse>("/readiness");
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function formatApiDetail(detail: unknown): string {
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "object" && item && "msg" in item) {
+          const location = Array.isArray((item as { loc?: unknown }).loc)
+            ? ` (${(item as { loc: unknown[] }).loc.join(".")})`
+            : "";
+          return `${String((item as { msg: unknown }).msg)}${location}`;
+        }
+        return formatApiDetail(item);
+      })
+      .filter(Boolean)
+      .join("; ");
+  }
+
+  if (typeof detail === "object" && detail) {
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return "Request failed with an unreadable error response";
+    }
+  }
+
+  return String(detail ?? "Request failed");
 }
 
 export function resolveAssetUrl(value?: string | null): string | undefined {
@@ -197,7 +462,13 @@ export function resolveAssetUrl(value?: string | null): string | undefined {
 
   const normalizedPath = value.startsWith("/") ? value : `/${value}`;
   const origin = apiOrigin();
-  return origin ? `${origin}${normalizedPath}` : normalizedPath;
+  if (origin) {
+    return `${origin}${normalizedPath}`;
+  }
+  if (API_BASE_URL.startsWith("/") && !normalizedPath.startsWith("/data/") && !normalizedPath.startsWith(`${API_BASE_URL}/`)) {
+    return `${API_BASE_URL}${normalizedPath}`;
+  }
+  return normalizedPath;
 }
 
 export function getApiErrorMessage(error: unknown): string {

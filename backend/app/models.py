@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def utc_now_iso() -> str:
@@ -59,9 +59,13 @@ class Severity(str, Enum):
 
 
 class FindingStatus(str, Enum):
-    ACCEPTED = "accepted"
     NEEDS_REVIEW = "needs_review"
+    ACCEPTED = "accepted"
     REJECTED = "rejected"
+    NEEDS_MANUAL_PLACEMENT = "needs_manual_placement"
+    NEEDS_ENGINEER_INPUT = "needs_engineer_input"
+    DUPLICATE = "duplicate"
+    DEFERRED = "deferred"
 
 
 class ReviewStatus(str, Enum):
@@ -114,6 +118,9 @@ class SheetRecord(BaseModel):
     text_content: str = ""
     width: float = 0
     height: float = 0
+    rotation: int = 0
+    source_width: float = 0
+    source_height: float = 0
     review_status: str = "new"
 
 
@@ -165,6 +172,12 @@ class FindingRecord(BaseModel):
     comment_text: str
     status: str = FindingStatus.NEEDS_REVIEW.value
     source: str = "rules"
+    original_ai_json: JsonDict | None = None
+    ai_batch_id: str | None = None
+    prompt_version: str | None = None
+    reviewer_note: str | None = None
+    placement_status: str | None = None
+    placement_details: JsonDict | None = None
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
 
@@ -172,12 +185,85 @@ class FindingRecord(BaseModel):
 class FindingUpdate(BaseModel):
     title: str | None = None
     category: str | None = None
-    severity: str | None = None
-    confidence: float | None = None
+    severity: Literal["Critical", "Major", "Minor", "Note"] | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    page_number: int | None = Field(default=None, ge=1)
+    target_text: str | None = None
     reasoning_summary: str | None = None
+    rationale: str | None = None
     suggested_correction: str | None = None
+    required_update: str | None = None
     comment_text: str | None = None
-    status: Literal["accepted", "needs_review", "rejected"] | None = None
+    reviewer_note: str | None = None
+    duplicate_of: str | None = None
+    status: Literal[
+        "needs_review",
+        "accepted",
+        "rejected",
+        "needs_manual_placement",
+        "needs_engineer_input",
+        "duplicate",
+        "deferred",
+    ] | None = None
+
+
+class BulkFindingUpdate(BaseModel):
+    finding_ids: list[str] = Field(default_factory=list, min_length=1)
+    update: FindingUpdate
+
+
+class ExportRequest(BaseModel):
+    statuses: list[
+        Literal[
+            "needs_review",
+            "accepted",
+            "rejected",
+            "needs_manual_placement",
+            "needs_engineer_input",
+            "duplicate",
+            "deferred",
+        ]
+    ] | None = Field(default=None, min_length=1)
+    accepted_only: bool | None = None
+
+
+MAX_AI_RESPONSE_CHARS = 2_000_000
+
+
+class ManualAIPreviewRequest(BaseModel):
+    response_text: str = Field(min_length=2, max_length=MAX_AI_RESPONSE_CHARS)
+    source_type: str = "manual_chat_prompt"
+    prompt_version: str | None = None
+    prompt_id: str | None = None
+
+
+class ManualAIImportRequest(BaseModel):
+    response_text: str | None = Field(default=None, max_length=MAX_AI_RESPONSE_CHARS)
+    preview_id: str | None = None
+    source_type: str = "manual_chat_prompt"
+    prompt_version: str | None = None
+    prompt_id: str | None = None
+
+    @model_validator(mode="after")
+    def response_or_preview_required(self) -> "ManualAIImportRequest":
+        if not (self.preview_id or (self.response_text and self.response_text.strip())):
+            raise ValueError("Provide preview_id from Preview AI Updates or response_text to import.")
+        return self
+
+
+class RollbackRequest(BaseModel):
+    confirm: bool = False
+
+
+class MergeFindingRequest(BaseModel):
+    target_finding_id: str
+
+
+class ProjectPackageImportResponse(BaseModel):
+    project: dict[str, Any]
+    original_project_id: str
+    restored_project_id: str
+    remapped_ids: bool
 
 
 class ExportRecord(BaseModel):
@@ -186,6 +272,7 @@ class ExportRecord(BaseModel):
     export_dir: str
     marked_pdf_path: str | None = None
     csv_path: str | None = None
+    qa_report_path: str | None = None
     xlsx_path: str | None = None
     json_path: str | None = None
     summary_path: str | None = None
@@ -199,3 +286,35 @@ class ExportResponse(BaseModel):
 
 JsonDict = dict[str, Any]
 
+
+class ManualAIPromptResponse(BaseModel):
+    project_id: str
+    prompt_id: str
+    prompt_version: str
+    generated_at: str
+    prompt: str
+    payload_sheet_count: int
+    instructions: str
+    prompt_metadata: JsonDict = Field(default_factory=dict)
+
+
+class AIImportBatchRecord(BaseModel):
+    id: str
+    project_id: str
+    source_type: str = "unknown"
+    prompt_version: str | None = None
+    prompt_id: str | None = None
+    raw_response_text: str | None = None
+    parser_warnings: list[str] = Field(default_factory=list)
+    parser_repairs: list[str] = Field(default_factory=list)
+    candidate_count: int = 0
+    valid_count: int = 0
+    skipped_count: int = 0
+    created_count: int = 0
+    updated_count: int = 0
+    duplicate_count: int = 0
+    import_status: str = "previewed"
+    preview: JsonDict | None = None
+    metadata: JsonDict = Field(default_factory=dict)
+    created_at: str = Field(default_factory=utc_now_iso)
+    imported_at: str | None = None

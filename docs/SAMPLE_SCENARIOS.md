@@ -2,7 +2,11 @@
 
 Scenario data lives in `samples/scenarios/regulator_station_scenarios.json`.
 
-The test suite currently covers:
+These scenarios are legacy deterministic reasoning fixtures. They do not describe the active UI review workflow, and they are not expected to create reviewer-visible findings when a project is uploaded or reprocessed.
+
+The active UI review workflow is AI-only: users generate a manual prompt, attach the PDF in ChatGPT or Copilot Chat, preview the returned JSON, and import valid updates. Imported updates become `source="ai"` review items. The configured direct AI path is optional and not required for the local no-key workflow.
+
+The legacy scenario test suite currently covers:
 
 - good regulator station
 - missing bypass
@@ -15,7 +19,7 @@ The test suite currently covers:
 - duplicate tag
 - revision/title block issue
 
-Each scenario contains synthetic sheet text and expected finding title fragments. Tests construct sheet and entity records, run the same reasoning engine used by the app, and confirm expected findings are present.
+Each scenario contains synthetic sheet text and expected finding title fragments. Tests construct sheet and entity records, run the legacy deterministic reasoning engine directly, and confirm expected internal findings are present. This preserves coverage for the station-graph/rule code without implying that the active UI creates deterministic rule findings.
 
 To add a scenario:
 
@@ -25,9 +29,11 @@ To add a scenario:
 4. Add `expected_findings` with title fragments that should appear.
 5. Run `pytest`.
 
-For full PDF workflow testing, use:
+For PDF ingestion and export-shell testing, use:
 
 ```powershell
 python scripts/make_sample_pdf.py
 python scripts/run_sample_review.py
 ```
+
+That script processes the sample PDF and exports the project shell. It should report zero findings unless AI updates have been imported or an AI provider review has created `source="ai"` findings.

@@ -1,0 +1,24 @@
+{
+  "updates": [
+    {
+      "page_number": 2,
+      "issue": "Inlet isolation valve tag should be coordinated",
+      "severity": "Minor",
+      "category": "drawing coordination",
+      "target_text": "INLET ISOLATION VALVE V-101",
+      "required_update": "Verify the inlet isolation valve tag is coordinated with the P&ID and revise if needed.",
+      "rationale": "The sample package uses an inlet isolation valve tag that should be checked against downstream sheets.",
+      "confidence": 0.82
+    },
+    {
+      "pdf_page": "PDF page 5",
+      "issue": "MAOP and OPP setpoint confirmation note needs closure",
+      "severity": "Major",
+      "category": "notes and specifications",
+      "target_text": "VERIFY FINAL MAOP AND OPP SETPOINTS BEFORE ISSUE.",
+      "required_update": "Resolve the final MAOP and OPP setpoint confirmation before issuing the drawing package.",
+      "rationale": "The note is a reviewer-facing action item that should be closed or assigned before final export.",
+      "confidence": 0.91
+    }
+  ]
+}

@@ -6,4 +6,12 @@ __pycache__/
 node_modules/
 dist/
 .env
-
+frontend/test-results/
+frontend/playwright-report/
+playwright-report/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.tmp
+examples/

@@ -7,12 +7,22 @@ from backend.app.models import SheetType
 
 
 @dataclass(frozen=True)
+class TitleCandidate:
+    title: str
+    source: str
+    confidence: float
+
+
+@dataclass(frozen=True)
 class TitleBlock:
     drawing_number: str = "UNKNOWN"
     sheet_title: str = "Unknown Sheet"
     revision: str = "UNKNOWN"
     project_number: str = "UNKNOWN"
     issue_date: str = "UNKNOWN"
+    sheet_title_source: str = "fallback"
+    sheet_title_confidence: float = 0.0
+    raw_extracted_title: str = ""
 
 
 def normalize_space(value: str) -> str:
@@ -61,8 +71,13 @@ def classify_sheet(text: str, page_number: int, drawing_number: str = "", title:
     return best.value if scores[best] > 0 else SheetType.UNKNOWN.value
 
 
-def extract_title_block(text: str, page_number: int) -> TitleBlock:
-    """Extract tolerant title block fields from normal PDF/OCR text."""
+def extract_title_block(text: str, page_number: int, supplemental_candidates: list[TitleCandidate] | None = None) -> TitleBlock:
+    """Extract tolerant title block fields from normal PDF/OCR text.
+
+    Supplemental candidates come from PDF metadata-adjacent sources such as bookmarks,
+    page labels, and document metadata. They are ranked with visible title-block text but
+    must pass the same sanity checks before becoming the display title.
+    """
 
     lines = [normalize_space(line) for line in text.splitlines() if normalize_space(line)]
     compact = "\n".join(lines)
@@ -72,19 +87,42 @@ def extract_title_block(text: str, page_number: int) -> TitleBlock:
         [
             r"(?:drawing|dwg)\s*(?:no\.?|number|#)\s*[:\-]\s*([A-Z0-9&.\-]+)",
             r"\b(?:DWG|DRAWING)\s+([A-Z]{1,4}-?\d{2,5}[A-Z]?)\b",
-            r"\b((?:PFD|PID|P&ID|M|L|N|D|GA)-?\d{2,5}[A-Z]?)\b",
+            r"\b((?:PFD|PID|P&ID|M|L|N|D|GA|EP)-?\d{2,5}[A-Z]?)\b",
         ],
     )
 
-    title = _field(
+    raw_title = _field(
         compact,
         [
             r"(?:sheet\s*)?title\s*[:\-]\s*([^\n]+)",
             r"drawing\s*title\s*[:\-]\s*([^\n]+)",
         ],
     )
-    if title == "UNKNOWN":
-        title = _infer_title_from_lines(lines, page_number)
+
+    candidates: list[TitleCandidate] = list(supplemental_candidates or [])
+    raw_extracted_title = "" if raw_title == "UNKNOWN" else raw_title
+    if raw_title != "UNKNOWN":
+        candidates.append(TitleCandidate(raw_title, "title_block", 0.88))
+
+    inferred_title = _infer_title_from_lines(lines, page_number)
+    if inferred_title != "UNKNOWN":
+        if not raw_extracted_title:
+            raw_extracted_title = inferred_title
+        candidates.append(TitleCandidate(inferred_title, "inferred_text", 0.62))
+
+    selected = select_sheet_title(candidates)
+    if selected:
+        title = normalize_space(selected.title)[:160]
+        title_source = selected.source
+        title_confidence = selected.confidence
+    elif page_number == 1:
+        title = "Cover Sheet"
+        title_source = "fallback"
+        title_confidence = 0.35
+    else:
+        title = "Unknown Sheet"
+        title_source = "fallback"
+        title_confidence = 0.0
 
     revision = _field(
         compact,
@@ -98,11 +136,54 @@ def extract_title_block(text: str, page_number: int) -> TitleBlock:
 
     return TitleBlock(
         drawing_number=drawing_number.upper(),
-        sheet_title=title[:160],
+        sheet_title=title,
         revision=revision.upper(),
         project_number=project_number,
         issue_date=issue_date,
+        sheet_title_source=title_source,
+        sheet_title_confidence=title_confidence,
+        raw_extracted_title=raw_extracted_title[:240],
     )
+
+
+def select_sheet_title(candidates: list[TitleCandidate]) -> TitleCandidate | None:
+    sane_candidates = [
+        TitleCandidate(normalize_space(candidate.title), candidate.source, candidate.confidence)
+        for candidate in candidates
+        if is_sane_sheet_title(candidate.title)
+    ]
+    if not sane_candidates:
+        return None
+    return max(sane_candidates, key=lambda candidate: (candidate.confidence, _title_specificity(candidate.title)))
+
+
+def is_sane_sheet_title(value: str | None) -> bool:
+    title = normalize_space(value or "")
+    if not title:
+        return False
+
+    low = title.lower()
+    if low in {"unknown", "unknown sheet", "untitled", "n/a", "na", "none"}:
+        return False
+    if "..." in title or len(title) > 120:
+        return False
+    if re.fullmatch(r"[A-Z]{1,4}-?\d{2,5}[A-Z]?", title, flags=re.IGNORECASE):
+        return False
+    if re.search(r"\b(page|sheet)\s+\d+\b", low) and len(title.split()) <= 3:
+        return False
+
+    tokens = re.findall(r"[A-Z0-9&/#\-]+", title.upper())
+    word_tokens = [token for token in tokens if re.search(r"[A-Z]", token)]
+    if len(word_tokens) >= 6:
+        unique_ratio = len(set(word_tokens)) / len(word_tokens)
+        adjacent_repeats = sum(1 for left, right in zip(word_tokens, word_tokens[1:]) if left == right)
+        if unique_ratio < 0.58 or adjacent_repeats >= 2:
+            return False
+
+    if _looks_like_index_row(title):
+        return False
+
+    return True
 
 
 def _field(text: str, patterns: list[str]) -> str:
@@ -117,9 +198,56 @@ def _field(text: str, patterns: list[str]) -> str:
 
 
 def _infer_title_from_lines(lines: list[str], page_number: int) -> str:
-    for line in lines[:18]:
-        low = line.lower()
-        if any(token in low for token in ["process flow", "p&id", "layout", "general notes", "legend", "drawing index"]):
-            return line[:160]
-    return "Cover Sheet" if page_number == 1 else "Unknown Sheet"
+    title_keywords = [
+        "process flow",
+        "p&id",
+        "piping and instrumentation",
+        "layout",
+        "general arrangement",
+        "general notes",
+        "legend",
+        "drawing index",
+        "sheet index",
+        "cover sheet",
+    ]
+    for line in lines[:24]:
+        candidate = normalize_space(line)
+        low = candidate.lower()
+        if any(token in low for token in title_keywords) and is_sane_sheet_title(candidate):
+            return candidate[:160]
+    return "UNKNOWN"
 
+
+def _looks_like_index_row(title: str) -> bool:
+    low = title.lower()
+    if low in {"drawing index", "sheet index", "drawing list", "cover sheet"}:
+        return False
+
+    table_tokens = [
+        "bill",
+        "civil",
+        "fuel",
+        "heat",
+        "mechanical",
+        "electrical",
+        "structural",
+        "instrument",
+        "instrumentation",
+        "p&id",
+        "pfd",
+        "process",
+        "layout",
+        "detail",
+        "index",
+    ]
+    hits = sum(1 for token in table_tokens if token in low)
+    words = re.findall(r"[A-Z0-9&/#\-]+", title.upper())
+    repeated_keywords = any(words.count(token.upper()) >= 3 for token in ["BILL", "CIVIL", "P&ID", "PFD", "FUEL"])
+    category_heavy = hits >= 4 and len(words) >= 7
+    all_caps_table_row = title == title.upper() and hits >= 3 and len(words) >= 6
+    return repeated_keywords or category_heavy or all_caps_table_row
+
+
+def _title_specificity(title: str) -> int:
+    words = re.findall(r"[A-Z0-9&/#\-]+", title.upper())
+    return len(set(words))

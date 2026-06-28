@@ -2,7 +2,15 @@ import type { Finding, FindingStatus, LocationPayload, Severity, Sheet } from ".
 
 export const SEVERITIES: Severity[] = ["Critical", "Major", "Minor", "Note"];
 
-export const STATUSES: FindingStatus[] = ["needs_review", "accepted", "rejected"];
+export const STATUSES: FindingStatus[] = [
+  "needs_review",
+  "accepted",
+  "rejected",
+  "needs_manual_placement",
+  "needs_engineer_input",
+  "duplicate",
+  "deferred",
+];
 
 export const CATEGORIES = [
   "tag consistency",
@@ -53,13 +61,55 @@ export function sheetLabel(sheet?: Sheet | null): string {
     return "No sheet";
   }
 
-  const number = sheet.drawing_number?.trim();
+  const number = cleanDrawingNumber(sheet.drawing_number);
   const title = sheet.sheet_title?.trim();
-  if (number && title) {
-    return `${number} - ${title}`;
+  const fallback = `Page ${sheet.page_number} • ${number || "Unknown drawing"}`;
+  if (title && isDisplayableSheetTitle(title, sheet)) {
+    return number ? `${number} - ${title}` : `${fallback} - ${title}`;
   }
 
-  return number || title || `Page ${sheet.page_number}`;
+  return fallback;
+}
+
+function cleanDrawingNumber(value?: string | null): string | null {
+  const number = value?.trim();
+  if (!number || ["UNKNOWN", "N/A", "NA"].includes(number.toUpperCase())) {
+    return null;
+  }
+  return number;
+}
+
+function isDisplayableSheetTitle(title: string, sheet: Sheet): boolean {
+  const clean = title.trim();
+  const lower = clean.toLowerCase();
+  if (!clean || ["unknown", "unknown sheet", "untitled", "n/a", "na"].includes(lower)) {
+    return false;
+  }
+  if (clean.length > 120 || clean.includes("...")) {
+    return false;
+  }
+  if (/^[a-z]{1,4}-?\d{2,5}[a-z]?$/i.test(clean)) {
+    return false;
+  }
+  const confidence = sheet.sheet_title_confidence;
+  if (typeof confidence === "number" && confidence > 0 && confidence < 0.5) {
+    return false;
+  }
+  const source = sheet.sheet_title_source?.toLowerCase();
+  if (source === "fallback") {
+    return false;
+  }
+  const words = clean.toUpperCase().match(/[A-Z0-9&/#-]+/g) || [];
+  if (words.length >= 6) {
+    const uniqueRatio = new Set(words).size / words.length;
+    const adjacentRepeats = words.filter((word, index) => index > 0 && words[index - 1] === word).length;
+    if (uniqueRatio < 0.58 || adjacentRepeats >= 2) {
+      return false;
+    }
+  }
+  const tableTokens = ["bill", "civil", "fuel", "heat", "mechanical", "electrical", "structural", "instrument", "p&id", "pfd", "layout", "detail"];
+  const hits = tableTokens.filter((token) => lower.includes(token)).length;
+  return !(hits >= 4 && words.length >= 7);
 }
 
 export function severityClass(severity: Severity | string): string {
