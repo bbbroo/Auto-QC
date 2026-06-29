@@ -27,6 +27,7 @@ AutoQC is not a sealed engineering authority. It is a markup and workflow aid. F
 - Markup placement status for exact, fuzzy, page-level, and manual-placement cases
 - Audit events for review actions, reruns, imports, exports, and bulk updates
 - Full in-app audit log, compact dashboard, readiness/system check, and first-run help guide
+- Guided review workflow with next-step status, recovery cards, and long-operation progress messages
 - Project package backup/restore with safe local source/export file copies
 - Marked PDF, QA register CSV, XLSX, JSON, HTML, and Markdown summary exports
 - Marked PDF export validation by reopening generated PDFs with PyMuPDF
@@ -65,6 +66,8 @@ AutoQC currently enforces the following direction:
 - The app still keeps extraction, page images, source PDF access, and export support.
 
 This means a newly uploaded project may show no findings until AI update JSON is imported.
+
+AutoQC also tracks review coverage separately from findings. A page with imported updates does not count as reviewed unless the AI response includes that page in `reviewed_pages` with `review_status: "complete"`. Pages with no updates can be recorded as reviewed clean only through the same `reviewed_pages` confirmation.
 
 ## Quick Start
 
@@ -120,9 +123,13 @@ For a deeper local check that also runs backend tests and frontend build checks:
 python scripts/doctor.py --full
 ```
 
-The doctor checks Python, Node/NPM, frontend dependencies, Playwright configuration, writable data storage, and default backend/frontend port availability.
+The doctor is a pre-start check: it expects the default backend/frontend ports to be free before launch. The in-app System Check uses `/readiness` for running-app health and does not warn just because ports 8000/5173 are already occupied by AutoQC.
 
 ## Reviewer efficiency
+
+The Review panel includes a `What should I do next?` guide that walks through upload, prompt generation, external PDF-attached AI review, JSON preview/import, reviewer disposition, placement cleanup, draft export, and final export. The `Recovery Center` shows the most important active blocker or recovery action, such as incomplete preview coverage, failed import batches, missing source PDF, manual-placement blockers, or final export readiness failures.
+
+Long-running or high-risk actions such as upload/extraction, prompt generation, preview, import, placement recalculation, package restore, Direct AI Review, and export show step-by-step progress messages. These messages are status indicators only; the underlying gates still come from backend validation, coverage metadata, placement status, and export validation.
 
 The findings panel includes a review queue, placement-quality filters, and keyboard shortcuts for faster review:
 
@@ -166,6 +173,7 @@ After import, AutoQC selects an imported AI finding and shows it in the review w
 
 Pasted ChatGPT/Copilot output is previewed before it becomes findings. The preview reports:
 
+- expected review pages, confirmed reviewed pages, missing pages, incomplete pages, not-readable pages, coverage status, and coverage percent
 - total candidate updates found
 - valid recoverable updates
 - skipped updates
@@ -176,7 +184,7 @@ Pasted ChatGPT/Copilot output is previewed before it becomes findings. The previ
 - whether each update will create a new finding or update an existing stable-ID match
 - normalized page number, target text, required update, rationale, category, severity, and confidence
 
-If zero updates are importable, AutoQC returns a visible error and records a failed import batch. It should not silently do nothing.
+If zero updates are importable, AutoQC can still preview the response. Import is blocked unless review coverage is complete, or it records a clean-page confirmation when the AI reviewed every expected page and found no updates.
 Updates with missing or blank `target_text` are rejected during preview with a user-facing reason. AutoQC only imports updates that cite usable drawing text anchors, so it does not create confusing page-only findings from vague AI output.
 
 ## Required AI Response Schema
@@ -185,6 +193,10 @@ ChatGPT or Copilot should return a JSON object with an `updates` array:
 
 ```json
 {
+  "schema_version": "autoqc-ai-updates-v1",
+  "reviewed_pages": [
+    { "page_number": 1, "review_status": "complete", "issue_count": 1 }
+  ],
   "updates": [
     {
       "issue": "Spill response plan appears misspelled as pill response plan.",
@@ -268,23 +280,44 @@ Placement statuses:
 - `exact_target_found`: target/location was found and annotated directly.
 - `fuzzy_target_found`: a reasonable shortened/normalized target match was found.
 - `page_level_fallback`: target text was not found, so AutoQC added a page-level note.
+- `manual_placement`: the reviewer placed a rectangle on the drawing image; that saved location drives future display/export.
 - `manual_placement_needed`: no valid target/page placement was available; manual placement is required.
 
-The UI labels these as `Placed`, `Fuzzy placed`, `Page note`, and `Needs manual placement`.
+The UI labels these as `Placed`, `Fuzzy placed`, `Page note`, `Manually placed`, and `Needs manual placement`.
 
 ## Prompt Versioning and Import History
 
-Generated Chat Prompts include a prompt template, prompt version such as `autoqc-chat-prompt-v1`, prompt ID, generated timestamp, and metadata confirming that the manual prompt includes only sheet metadata rather than full extracted sheet text.
+Generated Chat Prompts include a prompt template, prompt version such as `autoqc-chat-prompt-v4-exhaustive-manual`, prompt ID, generated timestamp, and metadata confirming that the manual prompt includes only sheet metadata rather than full extracted sheet text.
 
-Built-in local prompt templates include Default AutoQC Deep Review, Natural gas regulator station, Drawing coordination, Title block/revision, and Minimal smoke-test. Templates are stored locally in `data/prompt_templates.json` after first use. The attached PDF remains the drawing source of truth.
+Built-in production prompt templates now default to Exhaustive Manual-Style Review behavior. The default/deep/comprehensive templates instruct ChatGPT/Copilot to review every visible sheet with the same baseline method: extracted page-text review plus rendered sheet-image inspection. They explicitly forbid triage, sampling, skimming, high-risk-only review, and partial findings when the full package cannot be completed.
 
-Each AI import preview/import creates an import batch record with source type, prompt/template version, raw pasted response, parser mode/schema version, parser warnings/repairs, candidate/valid/skipped counts, created/updated/duplicate counts, and import status. The UI shows recent AI import batches for the selected project and can remove findings created by a selected imported batch after confirmation.
+The app still exposes intentionally lighter focused or smoke-test templates, but they are labeled as non-production shortcuts so they are not confused with the exhaustive manual prompt. Templates are stored locally in `data/prompt_templates.json`; built-in template IDs are refreshed from the canonical definitions so stale local v1/v2/v3 template text does not override the current exhaustive behavior.
+
+Generated prompts include the hard no-triage rule, the incomplete-review rule, the required `autoqc-ai-updates-v1` JSON schema, and an AI response self-check section. If ChatGPT/Copilot cannot complete the full sheet-by-sheet review, the prompt tells it to return the incomplete-review JSON error instead of partial findings. The attached PDF remains the drawing source of truth; sheet index, parser output, OCR status, and UNKNOWN metadata are navigation only and must not become drawing updates.
+
+Each AI import preview/import creates an import batch record with source type, prompt/template version, AI tool/provider/model provenance when known, exact raw pasted response stored server-side, parser mode/schema version, parser warnings/repairs, candidate/valid/skipped counts, created/updated/duplicate counts, coverage summary, and import status. Normal UI/API batch lists expose only a raw-response stored flag, character count, and SHA-256 hash, not the full pasted response. The Import Quality Report shows parsed/importable/imported/skipped counts, duplicate count, missing page/target counts, exact/fuzzy/page-level/manual-placement counts, low-confidence count, and warnings/errors. The UI shows recent AI import batches for the selected project and can remove findings created by a selected imported batch after confirmation.
+
+The findings panel includes a Finding Quality/Placement dashboard for exact placed, fuzzy placed, page-level, manual placement needed, low confidence, accepted, needs review, and duplicate/merged groups. These groups organize imported AI findings; they do not create findings.
+
+## Checklist Tracker
+
+AutoQC includes a checklist coverage tracker for client/package review organization, starting with an Xcel Engineering Package QC Checklist-style template. Checklist items track coverage and can link to existing AI findings. They do not create drawing findings, do not infer issues, and do not replace the attached PDF or reviewer judgment.
+
+Checklist item statuses are:
+
+- Not started
+- Checked
+- Issue found
+- Not applicable
+- Needs human review
+
+The checklist UI lets reviewers select a project checklist, filter sections such as All Sheets, Cover Sheet, Index, General Notes, Regulator Characteristics, PFD, P&ID, Civil/Structural, Civil Site, Demo, Mechanical Plan, Piping Sections/Details, Isometric, Heat Number/MTR, Weld/NDE, Bolt Torque, BOM, and Environmental, update statuses, add reviewer notes, link existing findings, and see completion progress. Checklist completion is included in export summaries when a checklist is selected.
 
 ## Backup, Restore, and Rollback
 
-Use `Export Project Package` in the Projects panel to create a portable AutoQC zip archive. The package includes project metadata, sheet metadata, imported AI findings and reviewer edits/statuses, AI prompt/import history, audit events, export records, safe local source PDF copy when available, rendered sheet images, and generated export files.
+Use `Export Project Package` in the Projects panel to create a portable AutoQC zip archive. The package includes project metadata, sheet metadata, imported AI findings and reviewer edits/statuses, AI prompt/import history, audit events, export records, safe local source PDF copy when available, rendered sheet images, and generated export files. Package `project.json` strips local absolute file paths for source PDFs, sheet images, and export artifacts; restore rebuilds local paths from the package file manifest.
 
-Use `Import Project Package` to restore a package. AutoQC does not overwrite an existing project by default; if the original project ID already exists, the restore is remapped to new IDs consistently.
+Use `Import Project Package` to restore a package. AutoQC runs a dry-run validation first: zip readability, schema and required JSON, safe paths, allowed file extensions, uncompressed size/file-count limits, source PDF readability, image readability, payload shape, and checksums when present. If restore fails after file copying starts, AutoQC removes the newly-created project directory and partial project row where practical. AutoQC does not overwrite an existing project by default; if the original project ID already exists, the restore is remapped to new IDs consistently. Older packages with missing optional collections are accepted with compatibility warnings; unsupported schema versions fail with a clear message.
 
 Use `Remove imported batch` in AI Import History to roll back findings created by a specific AI import batch. The confirmation states how many findings will be removed and how many reviewed/edited findings are affected. Updated pre-existing findings and unrelated findings are not deleted.
 
@@ -301,13 +334,13 @@ $env:AUTOQC_AI_API_KEY = "your-key"
 $env:AUTOQC_AI_BASE_URL = "https://api.openai.com/v1/chat/completions"
 ```
 
-This path is optional. The manual Chat Prompt bridge is the preferred no-key workflow.
+This path is optional and experimental. Direct AI Review currently sends extracted text/context only, is labeled `direct_review_mode: text_context_only`, and is not equivalent to the manual Chat Prompt workflow where the actual PDF is attached to ChatGPT/Copilot. It uses the same preview/import coverage and quality gates. If `AUTOQC_AI_MAX_SHEETS` caps the submitted sheets, the result is treated as a partial batch over the sent pages and cannot complete whole-package coverage by itself.
 
 The optional direct API path is separate from the manual Chat Prompt workflow and may send extracted sheet text to the configured AI endpoint. The manual Chat Prompt workflow intentionally requires the uploaded PDF and does not dump sheet body text into the prompt.
 
 ## Advanced Feature: Markup Memory
 
-Markup Memory is an experimental power-user feature under `Advanced Features`. When enabled, AutoQC stores local examples from reviewed findings so future Chat Prompts can include bounded reviewer guidance.
+Markup Memory is an experimental power-user feature under `Advanced Features`, available from the Help dialog rather than the primary workflow rail. When enabled, AutoQC stores local examples from reviewed findings so future Chat Prompts can include bounded reviewer guidance.
 
 What it can learn from:
 
@@ -332,8 +365,11 @@ What it does not do:
 - it does not create automatic findings by itself
 - it does not prove that a past issue exists in the current package
 - it does not replace attaching the actual drawing PDF to ChatGPT/Copilot
+- it does not send past examples anywhere by itself
 
-Markup Memory is off by default. To use it, open `Advanced Features`, enable Advanced Features, enable Markup Memory, and enable inclusion in generated prompts. The generated prompt explicitly states that past examples are guidance only and that the attached PDF remains the source of truth.
+Memory is local: Markup Memory is stored in AutoQC's local SQLite database. Past examples only appear in generated prompts when Advanced Features, Markup Memory, and prompt inclusion are explicitly enabled. Current-project examples are excluded by default so regenerating a prompt for the same drawing package does not over-bias the AI with already-reviewed findings.
+
+Markup Memory is off by default. To use it, open Help, choose `Advanced Features`, enable Advanced Features, enable Markup Memory, and enable inclusion in generated prompts. The generated prompt explicitly states that past examples are guidance only and that the attached PDF remains the source of truth.
 
 ## Try the Sample
 
@@ -355,7 +391,10 @@ Some legacy sample scripts may still mention review rules. Treat the active UI w
 
 ## Exports
 
-From the UI, choose which AI finding statuses to export and click the download button in the Export panel. The API default is accepted-only when no statuses are provided; the UI starts with `accepted` selected and lets reviewers include other statuses when a draft package is needed.
+The Export panel has two modes:
+
+- `Draft`: lets reviewers include selected statuses such as `needs_review`, `deferred`, `needs_engineer_input`, and placement warnings. Draft outputs are intended for working review packages and use draft-labeled filenames/summaries.
+- `Final`: accepted findings only, complete review coverage required, manual-placement blockers rejected, generated PDF validation must pass or warnings must be explicitly acknowledged, and reviewer signoff metadata is required.
 
 Generated files are under:
 
@@ -372,7 +411,9 @@ Typical export outputs include:
 - HTML review packet
 - Markdown summary
 
-The marked PDF uses standard PDF annotations, so it opens in Bluebeam and common PDF viewers without Bluebeam-specific APIs.
+Final exports include export validation details, review coverage summary, and reviewer signoff summary in the response and summary files. Final exports do not support a coverage override in the pilot workflow; missing coverage must be resolved by importing valid `reviewed_pages` confirmations.
+
+The marked PDF uses standard PDF text annotations, so it opens in Bluebeam and common PDF viewers without Bluebeam-specific APIs. AutoQC does not claim to create proprietary Bluebeam Cloud+ markups. Exact Bluebeam Cloud+ output should only be added if AutoQC integrates a verified Bluebeam-compatible/proprietary markup writer rather than approximating Cloud+ with separate cloud, line, and text-box annotations.
 
 Exports include AI-sourced findings only.
 Empty exports are blocked. Select at least one status that has imported AI findings before generating a package.
@@ -412,11 +453,33 @@ The backend tests cover:
 - AI-only finding filtering
 - invalid ID and safe file-serving behavior
 - AI preview rejection for missing target text and stale preview imports
+- import quality report counting
+- strict review coverage gates and clean-page confirmation
+- direct AI text-only labeling and coverage blocking
+- draft/final export readiness gates and signoff metadata
+- project package import dry-run validation
+- running-app readiness without false port warnings
+- legacy project/package compatibility defaults
+- raw AI response preservation with public API redaction
+- manual placement persistence
+- checklist tracker selection, progress, and existing-finding links
 - export safety for bad/missing annotation rectangles
 - empty export prevention
 - marked PDF export behavior, placement statuses, and QA report output
 
 The frontend test script runs Playwright against isolated local ports and data storage. It does not require external API keys.
+
+Additional local workflow scripts:
+
+```powershell
+python scripts/smoke_ai_workflow.py
+python scripts/stress_large_package.py
+python scripts/regression_real_pdfs.py
+```
+
+Each validation script writes a JSON and Markdown report under `data/validation_reports/` with tested checks, pass/fail status, workflow metrics, and generated artifact references. These reports are local generated artifacts and are not intended to be committed.
+
+`regression_real_pdfs.py` uses PDFs under `examples/` when present and checks workflow mechanics only: upload/extraction, images, source PDF endpoint, prompt scope, coverage gates, representative AI JSON import, placement recalculation, draft export, final export readiness/signoff behavior, and PDF reopen validation. It does not assert engineering finding conclusions.
 
 ## Current Engineering Review Limits
 

@@ -4,6 +4,8 @@ Scenario data lives in `samples/scenarios/regulator_station_scenarios.json`.
 
 These scenarios are legacy deterministic reasoning fixtures. They do not describe the active UI review workflow, and they are not expected to create reviewer-visible findings when a project is uploaded or reprocessed.
 
+Active reviewer coverage is now tracked through imported AI `reviewed_pages` confirmations, not through these deterministic scenarios.
+
 The active UI review workflow is AI-only: users generate a manual prompt, attach the PDF in ChatGPT or Copilot Chat, preview the returned JSON, and import valid updates. Imported updates become `source="ai"` review items. The configured direct AI path is optional and not required for the local no-key workflow.
 
 The legacy scenario test suite currently covers:

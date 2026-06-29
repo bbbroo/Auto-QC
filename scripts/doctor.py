@@ -14,7 +14,7 @@ DATA_DIR = REPO_ROOT / "data"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Check whether the local AutoQC development environment is ready.")
+    parser = argparse.ArgumentParser(description="Pre-start AutoQC doctor. Checks dependencies, writable folders, and whether default ports are free before launch.")
     parser.add_argument("--full", action="store_true", help="Also run pytest, frontend typecheck, and frontend build.")
     args = parser.parse_args()
 
@@ -37,8 +37,8 @@ def main() -> int:
         checks.append(run_command("Frontend build", [npm_executable, "run", "build"], FRONTEND_DIR))
 
     failed = False
-    print("AutoQC Doctor")
-    print("=============")
+    print("AutoQC Pre-start Doctor")
+    print("=======================")
     for name, ok, detail in checks:
         marker = "PASS" if ok else "FAIL"
         print(f"[{marker}] {name}: {detail}")

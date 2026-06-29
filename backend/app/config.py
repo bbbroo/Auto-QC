@@ -34,6 +34,8 @@ class Settings:
         )
         self.ai_timeout_seconds = float(os.getenv("AUTOQC_AI_TIMEOUT_SECONDS", "60"))
         self.ai_max_sheets = int(os.getenv("AUTOQC_AI_MAX_SHEETS", "20"))
+        self.use_sheet_evidence = _env_bool("AUTOQC_USE_SHEET_EVIDENCE", default=False)
+        self.sheet_evidence_prompt_max_pages = int(os.getenv("AUTOQC_SHEET_EVIDENCE_PROMPT_MAX_PAGES", "80"))
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +115,13 @@ def _load_json(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return {}
+
+
+def _env_bool(name: str, *, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _user_ai_settings_path() -> Path:

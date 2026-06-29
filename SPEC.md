@@ -1,5 +1,18 @@
 # Natural Gas Engineering Copilot One-Shot Build Spec
 
+## Current AutoQC Product Boundary
+
+This document preserves the original build brief, including legacy deterministic reasoning language. The current AutoQC pilot boundary supersedes that early direction for user-facing findings:
+
+- AutoQC is an AI-imported-update workflow.
+- Upload/reprocess extracts sheets, page images, metadata, entities, OCR/text, checklist coverage, and prompt context, but it does not create reviewer-visible deterministic QC findings.
+- User-facing findings/comments come from imported AI update JSON, optional configured Direct AI Review when clearly labeled, or reviewer/manual edits to those AI findings.
+- Checklist tracking records coverage and links existing findings only; it does not generate findings.
+- Direct AI Review is currently experimental/text-context-only unless upgraded to true PDF/image-capable review and must pass the same coverage/import gates.
+- Final export requires complete imported review coverage, accepted findings, signoff, and validation readiness.
+- Raw pasted AI responses are preserved server-side for audit, while normal UI/API batch summaries expose only safe trace metadata.
+- Project packages validate before restore and strip local absolute paths from package JSON; restored paths are rebuilt from package contents.
+
 ## Purpose
 
 Create a complete local-first application called Natural Gas Engineering Copilot. The app should act like an advanced AI engineering review assistant for natural gas regulator station drawing packages. The goal is to automate as much of a mechanical engineer's drawing QC workflow as possible by reviewing PDF drawing sets, reasoning about natural gas regulator station design, identifying likely issues, producing evidence-backed QC findings, and exporting a fully marked-up PDF that can be opened and reviewed in Bluebeam.

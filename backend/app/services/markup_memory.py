@@ -78,6 +78,12 @@ class MarkupMemoryService:
         avoid_limit = _positive_int(settings.get("max_avoid_examples_per_prompt"), 5, 25)
         min_score = float(settings.get("min_usefulness_score") or 0)
         examples = self.db.list_markup_memory_examples(min_usefulness_score=min_score)
+        if not settings.get("include_current_project_examples"):
+            examples = [
+                example
+                for example in examples
+                if example.get("source_project_id") != project_id
+            ]
         context = self._project_context(project_id)
 
         include_positive_outcomes: set[str] = set()

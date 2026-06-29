@@ -21,16 +21,18 @@ The deterministic rule engine remains in the repository as internal/testable leg
 AI provider responses or manually imported AI JSON updates are previewed before they become candidate findings. The active workflow then:
 
 1. Parses strict JSON or common ChatGPT/Copilot malformed JSON into a preview.
-2. Reports parser repairs, warnings, missing/weak fields, duplicate stable IDs, and create/update actions.
-3. Requires a valid page number, usable `target_text`, and update/comment text for import.
-4. Maps the update to the matching sheet.
-5. Creates a stable AI rule ID primarily from page and normalized target text.
-6. Converts the update into a `CandidateFinding` with `source="ai"`.
-7. Preserves original AI fields, AI import batch ID, and prompt version for audit/debugging.
-8. Normalizes and deduplicates candidates.
-9. Sets status to `needs_review` so a human reviewer confirms, edits, rejects, defers, or escalates the item before export.
+2. Reports parser repairs, warnings, missing/weak fields, duplicate stable IDs, coverage status, and create/update actions.
+3. Computes expected review pages from the prompt scope: whole package, batch, or single sheet.
+4. Blocks import unless every expected page is confirmed in `reviewed_pages` with `review_status: "complete"`.
+5. Requires a valid page number, usable `target_text`, and update/comment text for each imported finding.
+6. Maps the update to the matching sheet.
+7. Creates a stable AI rule ID primarily from page and normalized target text.
+8. Converts the update into a `CandidateFinding` with `source="ai"`.
+9. Preserves original AI fields, AI import batch ID, and prompt version for audit/debugging.
+10. Normalizes and deduplicates candidates.
+11. Sets status to `needs_review` so a human reviewer confirms, edits, rejects, defers, or escalates the item before export.
 
-Updates with missing or blank `target_text` are skipped during preview with a visible reason. Preview IDs can only be imported while their batch is still `previewed`; stale or already imported previews must be regenerated so old pasted JSON cannot silently overwrite a newer import.
+Updates with missing or blank `target_text` are skipped during preview with a visible reason. Pages with updates do not automatically count as reviewed; clean pages count only when imported `reviewed_pages` confirms them complete and there are no returned update candidates for that page. Preview IDs can only be imported while their batch is still `previewed`; stale or already imported previews must be regenerated so old pasted JSON cannot silently overwrite a newer import.
 
 The active API returns only these AI findings through `/projects/{project_id}/findings`.
 
@@ -48,7 +50,9 @@ Expanded reviewer statuses are:
 - `duplicate`
 - `deferred`
 
-Exports include only selected statuses and always filter to `source="ai"`.
+Draft exports include selected statuses, use draft-labeled filenames/summaries, and always filter to `source="ai"`. Final exports are stricter: accepted findings only, complete review coverage required, reviewer signoff required, no manual-placement blockers, and generated PDF validation must pass or have warnings explicitly acknowledged. The pilot workflow does not support a final-export coverage override.
+
+Direct AI Review is optional and experimental. It is text-context-only unless upgraded to true PDF/image review. If the direct path is capped by `AUTOQC_AI_MAX_SHEETS`, imported coverage is scoped to only the sent pages and cannot complete a whole-package review by itself.
 
 ## Placement Statuses
 

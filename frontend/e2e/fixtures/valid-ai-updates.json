@@ -1,4 +1,12 @@
 {
+  "schema_version": "autoqc-ai-updates-v1",
+  "reviewed_pages": [
+    { "page_number": 1, "review_status": "complete", "issue_count": 0 },
+    { "page_number": 2, "review_status": "complete", "issue_count": 1 },
+    { "page_number": 3, "review_status": "complete", "issue_count": 0 },
+    { "page_number": 4, "review_status": "complete", "issue_count": 0 },
+    { "page_number": 5, "review_status": "complete", "issue_count": 1 }
+  ],
   "updates": [
     {
       "page_number": 2,

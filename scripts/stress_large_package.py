@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import fitz
@@ -13,6 +14,7 @@ from backend.app.database import Database
 from backend.app.services.ai_review import AIReviewService
 from backend.app.services.exports import ExportService
 from backend.app.services.pdf_processor import PDFProcessor
+from scripts.validation_reports import write_validation_report
 
 
 def create_large_wide_pdf(path: Path, pages: int = 24) -> None:
@@ -37,6 +39,7 @@ def create_large_wide_pdf(path: Path, pages: int = 24) -> None:
 
 
 def main() -> None:
+    start = time.perf_counter()
     settings.ensure_dirs()
     db = Database(settings.db_path)
     db.init_schema()
@@ -64,10 +67,44 @@ def main() -> None:
             }
         )
     ai_service = AIReviewService(db, settings)
-    imported = ai_service.import_manual_response(project["id"], json.dumps({"updates": updates}))
+    reviewed_pages = [
+        {"page_number": sheet["page_number"], "review_status": "complete", "issue_count": 1}
+        for sheet in processed["sheets"]
+    ]
+    imported = ai_service.import_manual_response(project["id"], json.dumps({"reviewed_pages": reviewed_pages, "updates": updates}))
     for finding in db.list_findings(project["id"], sources=["ai"]):
         db.update_finding(finding["id"], {"status": "accepted"})
     export = ExportService(db, settings.data_dir).export_project(project["id"], statuses=["accepted"])
+    elapsed = time.perf_counter() - start
+    report = write_validation_report(
+        data_dir=settings.data_dir,
+        report_name="autoqc_large_package_stress",
+        status="passed",
+        summary="Large/wide synthetic package upload, import, placement, and draft export completed.",
+        checks=[
+            {"name": "wide_pdf_extracted", "passed": len(processed["sheets"]) == 24, "detail": f"{len(processed['sheets'])} sheets"},
+            {"name": "reviewed_pages_complete", "passed": imported["batch"]["metadata"]["review_coverage"]["review_coverage_status"] == "complete", "detail": "All synthetic pages confirmed"},
+            {"name": "ai_updates_imported", "passed": imported["ai_updates_imported"] == len(processed["sheets"]), "detail": f"{imported['ai_updates_imported']} imported"},
+            {"name": "draft_export_created", "passed": export["findings_exported"] == len(processed["sheets"]), "detail": export["validation"]["status"]},
+            {"name": "marked_pdf_reopened", "passed": export["validation"]["marked_page_count"] == len(processed["sheets"]), "detail": f"{export['validation']['marked_page_count']} marked pages"},
+        ],
+        metrics={
+            "sheets": len(processed["sheets"]),
+            "findings_imported": imported["ai_updates_imported"],
+            "findings_exported": export["findings_exported"],
+            "validation": export["validation"]["status"],
+            "elapsed_seconds": round(elapsed, 2),
+        },
+        artifacts={
+            "source_pdf": source_pdf,
+            "marked_pdf": export["export"]["marked_pdf_path"],
+            "summary": export["export"].get("summary_path"),
+        },
+        limitations=[
+            "Synthetic stress fixture verifies large-package mechanics and timing only.",
+            "It does not assert natural gas engineering correctness.",
+        ],
+    )
 
     print("AutoQC large/wide stress fixture complete")
     print(f"Project: {project['id']}")
@@ -76,6 +113,8 @@ def main() -> None:
     print(f"Findings exported: {export['findings_exported']}")
     print(f"Validation: {export['validation']['status']}")
     print(f"Marked PDF: {export['export']['marked_pdf_path']}")
+    print(f"Elapsed seconds: {elapsed:.1f}")
+    print(f"Validation report: {report['markdown']}")
 
 
 if __name__ == "__main__":

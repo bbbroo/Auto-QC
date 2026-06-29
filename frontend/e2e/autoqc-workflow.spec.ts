@@ -69,6 +69,8 @@ test("manual Chat Prompt AI workflow can preview, import, review, and export", a
   await page.getByRole("tab", { name: /Review/ }).click();
   await expect(page.getByRole("combobox", { name: "Prompt template" })).toBeVisible();
   await expect(page.getByLabel("System Check panel")).toContainText("System Check");
+  await expect(page.getByLabel("What should I do next")).toContainText("Upload PDF");
+  await expect(page.getByLabel("Recovery Center")).toContainText(/No AI findings imported yet|No active recovery items/);
   await page.getByRole("button", { name: "Chat Prompt" }).click();
   await expect(page.getByText("Manual Bridge Pro")).toBeVisible();
   await expect(page.getByRole("link", { name: "Open Source PDF", exact: true })).toBeVisible();
@@ -116,13 +118,10 @@ test("manual Chat Prompt AI workflow can preview, import, review, and export", a
 
   await inletFinding.click();
   await expect(page.getByRole("tab", { name: "Finding Focus" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByLabel("Selected finding review card")).toContainText("Inlet isolation valve tag should be coordinated");
-  await expect(page.getByLabel("Selected finding review card")).toContainText("Final PDF comment");
-  await expect(page.getByLabel("Selected finding review card")).toContainText(/Exact target found|Fuzzy target found|Page-level finding/);
-  await page.getByRole("button", { name: "Recalculate Location" }).click();
-  await expect(page.getByText(/Recalculated locations for/)).toBeVisible();
-  await expect(page.getByRole("main").getByText(/Placement:/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Edit in Inspector" })).toBeVisible();
+  await expect(page.getByText("Inspector", { exact: true })).toBeVisible();
+  await expect(page.locator(".viewer-finding-card")).toHaveCount(0);
+  await expect(page.getByLabel("Manual markup placement")).toContainText(/Exact target found|Fuzzy target found|Page-level finding|Manual placement/);
+  await expect(page.getByRole("button", { name: "Place on drawing" })).toBeVisible();
   await page.getByRole("button", { name: "Next sheet" }).click();
   await expect(page.getByRole("heading", { name: /PID-100/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Full Sheet" })).toHaveAttribute("aria-selected", "true");
@@ -141,31 +140,33 @@ test("manual Chat Prompt AI workflow can preview, import, review, and export", a
   await page.getByRole("button", { name: "Save" }).click();
   await expect(titleInput).toHaveValue("Reviewer edited inlet valve coordination");
 
-  await page.getByLabel("Selected finding review card").getByRole("button", { name: "Reject" }).click();
+  await page.getByRole("button", { name: "Reject" }).click();
   await expect(page.getByLabel("Status")).toHaveValue("rejected");
   await page.getByRole("button", { name: "Review", exact: true }).click();
   await expect(page.getByLabel("Status")).toHaveValue("needs_review");
 
   await page.getByRole("tab", { name: /Export/ }).click();
-  await expect(page.getByText("0 findings selected for export.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Draft", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Final", exact: true })).toBeVisible();
+  await expect(page.getByText("0 findings selected for draft export.")).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("No findings match the selected status filters");
-  await expect(page.getByRole("button", { name: "Export" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Create Draft Export" })).toBeDisabled();
   await expect(page.getByText("Accepted").last()).toBeVisible();
   await expect(page.getByText("Needs Review").last()).toBeVisible();
   await expect(page.getByText("Rejected").last()).toBeVisible();
 
   await page.getByRole("tab", { name: /Inspect/ }).click();
-  await page.getByLabel("Selected finding review card").getByRole("button", { name: "Accept" }).click();
+  await page.getByRole("button", { name: "Accept" }).click();
   await expect(page.getByLabel("Status")).toHaveValue("accepted");
 
   await page.getByRole("tab", { name: /Export/ }).click();
-  await expect(page.getByText("1 finding selected for export.")).toBeVisible();
-  await page.getByRole("button", { name: "Export" }).click();
+  await expect(page.getByText("1 finding selected for draft export.")).toBeVisible();
+  await page.getByRole("button", { name: "Create Draft Export" }).click();
   await expect(page.getByRole("link", { name: "Download Marked PDF" })).toBeVisible();
   await expect(page.getByText(/Validation (Passed|Warning|Failed)/)).toBeVisible();
   await expect(page.getByText("Generated files")).toBeVisible();
   await page.getByRole("tab", { name: /Review/ }).click();
-  await expect(page.getByLabel("Full audit log")).toContainText(/Review package exported|AI updates imported/);
+  await expect(page.getByLabel("Full audit log")).toContainText(/Draft export created|AI updates imported/);
 });
 
 test("import history can remove an imported batch with confirmation", async ({ page }) => {
@@ -183,6 +184,53 @@ test("import history can remove an imported batch with confirmation", async ({ p
   await expect(page.getByText("No AI findings imported yet")).toBeVisible();
   await page.getByRole("tab", { name: /Review/ }).click();
   await expect(page.getByLabel("Full audit log")).toContainText("AI import batch rolled back");
+});
+
+test("PDF viewer supports pane zoom, markup selection, no popup, and left rail collapse", async ({ page }) => {
+  await page.goto("/");
+  await createSampleAndImportValidAi(page);
+  await page.getByRole("tab", { name: /Sheets/ }).click();
+  await page.getByRole("button", { name: /PFD-100/ }).click();
+
+  const viewport = page.locator(".drawing-pan-viewport");
+  const stage = page.locator(".drawing-stage");
+  await expect(viewport).toBeVisible();
+  await page.getByRole("button", { name: "Zoom in" }).click();
+  await page.getByRole("button", { name: "Zoom in" }).click();
+
+  const scrollResult = await viewport.evaluate((node) => {
+    const element = node as HTMLElement;
+    const canScroll = element.scrollWidth > element.clientWidth || element.scrollHeight > element.clientHeight;
+    element.scrollLeft = 40;
+    element.scrollTop = 40;
+    return { canScroll, left: element.scrollLeft, top: element.scrollTop };
+  });
+  expect(scrollResult.canScroll).toBeTruthy();
+  expect(scrollResult.left + scrollResult.top).toBeGreaterThan(0);
+
+  const beforeZoom = await stage.boundingBox();
+  const beforeWindowScroll = await page.evaluate(() => window.scrollY);
+  await viewport.dispatchEvent("wheel", {
+    deltaY: -180,
+    clientX: 240,
+    clientY: 220,
+    ctrlKey: true,
+  });
+  await page.waitForTimeout(80);
+  const afterZoom = await stage.boundingBox();
+  const afterWindowScroll = await page.evaluate(() => window.scrollY);
+  expect(afterZoom?.width ?? 0).toBeGreaterThan(beforeZoom?.width ?? 0);
+  expect(afterWindowScroll).toBe(beforeWindowScroll);
+
+  await page.locator(".finding-overlay").first().click();
+  await expect(page.getByText("Inspector", { exact: true })).toBeVisible();
+  await expect(page.locator(".viewer-finding-card")).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Finding Focus" })).toHaveAttribute("aria-selected", "true");
+
+  const beforeCollapse = await page.locator(".viewer-pane").boundingBox();
+  await page.getByRole("button", { name: "Collapse left panel" }).click();
+  const afterCollapse = await page.locator(".viewer-pane").boundingBox();
+  expect(afterCollapse?.width ?? 0).toBeGreaterThan(beforeCollapse?.width ?? 0);
 });
 
 test("backend unavailable state shows a visible alert", async ({ page }) => {
@@ -219,4 +267,10 @@ test("keyboard focus is visible and can move through primary controls", async ({
 
   const hasVisibleFocus = await page.evaluate(() => Boolean(document.activeElement?.matches(":focus-visible")));
   expect(hasVisibleFocus).toBeTruthy();
+
+  await page.getByRole("tab", { name: "Projects" }).focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("tab", { name: "Sheets" })).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("End");
+  await expect(page.getByRole("tab", { name: "Export" })).toHaveAttribute("aria-selected", "true");
 });

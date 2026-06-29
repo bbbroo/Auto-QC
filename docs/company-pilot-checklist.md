@@ -32,17 +32,20 @@ Use this checklist before and during a company pilot. AutoQC is a local workflow
 
 ## ChatGPT/Copilot Manual Bridge
 
-- Choose the appropriate prompt template.
+- For production review, use the default Exhaustive Manual Review prompt or another exhaustive manual template.
 - Generate `Chat Prompt`.
 - Attach/upload the same PDF package in ChatGPT or Copilot Chat.
 - Paste the prompt and request JSON only.
-- Do not use the prompt alone as drawing evidence.
+- Confirm the generated prompt includes the hard no-triage rule and incomplete-review rule.
+- Do not accept partial findings if ChatGPT/Copilot says it could not complete every-sheet text plus visual inspection; import the incomplete-review error as a failed review signal instead.
+- Do not use the prompt, sheet index, parser output, OCR status, or UNKNOWN metadata as drawing evidence. The attached PDF is the source of truth.
 
 ## Import JSON Checks
 
 - Paste or import the returned JSON.
 - Confirm schema version/parser mode appears in preview.
 - Confirm valid/skipped counts make sense.
+- Confirm review coverage is complete for the intended scope before import; pages with skipped update candidates should not be treated as clean pages.
 - Review exact and likely duplicate warnings.
 - Confirm bad items without `page_number` or usable `target_text` are rejected.
 - Import only after preview is acceptable.
@@ -64,6 +67,7 @@ Use this checklist before and during a company pilot. AutoQC is a local workflow
 ## Marked PDF Export Checks
 
 - Select export statuses intentionally.
+- Use draft export for working packages and final export only for accepted findings with complete coverage and reviewer signoff.
 - Confirm empty/no-op exports are blocked.
 - Export the review package.
 - Confirm Export validation shows Passed or acceptable Warning.
@@ -83,6 +87,7 @@ Use this checklist before and during a company pilot. AutoQC is a local workflow
 - Import the package into a clean or existing AutoQC workspace.
 - Confirm IDs are remapped when the original project already exists.
 - Confirm sheets, imported AI findings, statuses/edits, import history, audit log, exports, source PDF copy, and generated reports are restored.
+- Confirm import preview warnings are reviewed before confirming restore.
 
 ## Known Limitations
 
@@ -90,7 +95,7 @@ Use this checklist before and during a company pilot. AutoQC is a local workflow
 - AI findings depend on the quality of the ChatGPT/Copilot response and the attached PDF.
 - The app cannot prove engineering correctness.
 - Manual placement may still be needed for missing/fuzzy target text.
-- Live direct-AI API behavior is optional and separate from the manual bridge.
+- Live Direct AI API behavior is optional, text-context-only, and separate from the manual bridge. If sheet sending is capped, it counts only the sent pages.
 
 ## Data / Privacy Notes
 
@@ -98,4 +103,4 @@ Use this checklist before and during a company pilot. AutoQC is a local workflow
 - Uploaded source PDFs are served only through the project source-PDF endpoint.
 - Generic `/data` serving is limited to generated sheet images and export files.
 - Manual ChatGPT/Copilot use sends the attached PDF to the selected external chat service; follow company data rules before uploading confidential drawings.
-- Project package zips may contain source PDFs and export artifacts; handle them as company drawing records.
+- Project package zips may contain source PDFs, export artifacts, and AI import history; handle them as company drawing records. Package JSON strips local machine paths, but the archive contents are still project data.

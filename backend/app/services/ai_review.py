@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import uuid
@@ -16,11 +17,43 @@ from backend.app.services.exports import _evidence_search_result
 from backend.app.services.markup_memory import MarkupMemoryService
 from backend.app.services.prompt_templates import PromptTemplateManager
 from backend.app.services.reasoning.engine import CandidateFinding, ReasoningEngine
+from backend.app.services.review_coverage import (
+    build_review_coverage_summary,
+    clean_pages_from_preview,
+    expected_review_pages_for_scope,
+    project_review_coverage_summary,
+)
 from backend.app.services.storage import require_project_source_pdf_path
+from backend.sheet_evidence.builder import SheetEvidenceBuilder
+from backend.sheet_evidence.prompt_context import package_prompt_context
+from backend.sheet_evidence.recommendation import analyze_benchmark_run, find_latest_benchmark_run
 
 
-CHAT_PROMPT_VERSION = "autoqc-chat-prompt-v1"
+CHAT_PROMPT_VERSION = "autoqc-chat-prompt-v4-exhaustive-manual"
 DEFAULT_IMPORT_SOURCE = "manual_chat_prompt"
+DEFAULT_MANUAL_BATCH_SIZE = 8
+ALLOWED_MANUAL_BATCH_SIZES = {3, 5, 8, 10}
+TEXT_HEAVY_DEEP_DIVE_CHARS = 2500
+HIGH_ENTITY_DEEP_DIVE_COUNT = 20
+DEEP_DIVE_SHEET_TYPES = {"notes", "drawing_index", "p&id", "detail"}
+PROMPT_DEPTH_OPTIONS: dict[str, dict[str, str]] = {
+    "fast": {
+        "label": "Fast Smoke/Test Review (Non-Production)",
+        "instruction": "Use only for controlled app smoke tests; production deep/comprehensive reviews should use the exhaustive manual template.",
+    },
+    "standard": {
+        "label": "Focused Review (Non-Exhaustive)",
+        "instruction": "Use only for an intentionally narrow non-production check. Production package review should use exhaustive manual review.",
+    },
+    "comprehensive": {
+        "label": "Exhaustive Manual-Style Review",
+        "instruction": "Full sheet-by-sheet manual review of the attached PDF package and return the incomplete-review error instead of partial findings if the full review cannot be completed.",
+    },
+    "exhaustive": {
+        "label": "Exhaustive Manual-Style Review",
+        "instruction": "Full sheet-by-sheet manual review of the attached PDF package with no partial findings.",
+    },
+}
 
 
 def _mask_api_key(value: str | None) -> str | None:
@@ -91,26 +124,64 @@ class AIReviewService:
     def list_prompt_templates(self) -> list[dict[str, Any]]:
         return self.templates.list_templates()
 
-    def generate_manual_prompt(self, project_id: str, template_id: str | None = None) -> dict[str, Any]:
+    def generate_manual_prompt(
+        self,
+        project_id: str,
+        template_id: str | None = None,
+        review_depth: str | None = None,
+        review_scope: str | None = None,
+        page_number: int | None = None,
+        page_numbers: str | list[int] | None = None,
+        batch_size: int | None = None,
+    ) -> dict[str, Any]:
         project = self.db.get_project(project_id)
         sheets = self.db.list_sheets(project_id)
         entities = self.db.list_entities(project_id)
         existing = self.db.list_findings(project_id, sources=["ai"])
         template = self.templates.get_template(template_id)
-        payload = build_ai_payload(project, sheets, entities, existing, self.settings.ai_max_sheets)
+        scope = resolve_manual_review_scope(sheets, review_scope, page_number, page_numbers, batch_size)
+        payload = build_ai_payload(
+            project,
+            sheets,
+            entities,
+            existing,
+            max(self.settings.ai_max_sheets, len(sheets)),
+            scope_pages=scope.get("scope_pages"),
+            review_scope=scope["review_scope"],
+        )
         context = manual_prompt_context(payload)
         prompt_version = str(template.get("version") or CHAT_PROMPT_VERSION)
         memory_context = self.markup_memory.build_markup_memory_prompt_context(project_id)
+        sheet_evidence_context = self.build_sheet_evidence_prompt_context(project_id, scope)
+        depth = normalize_prompt_depth(review_depth)
         prompt_metadata = {
             "included_full_extracted_text": False,
             "sheet_index_count": len(context.get("sheet_index", [])),
+            "sheet_count": len(sheets),
+            "scope_sheet_count": len(payload.get("sheets", [])),
+            "review_strategy": scope["review_strategy"],
+            "review_scope": scope["review_scope"],
+            "scope_pages": scope.get("scope_pages") or [],
+            "scope_label": scope.get("scope_label"),
+            "batch_size": scope.get("batch_size"),
+            "batch_index": scope.get("batch_index"),
+            "batch_count": scope.get("batch_count"),
+            "deep_dive_reason": scope.get("deep_dive_reason"),
+            "single_output_required": scope["review_scope"] == "package",
+            "sheet_by_sheet_required": True,
             "source_of_truth": "attached_pdf",
             "prompt_template_id": template.get("id"),
             "prompt_template_name": template.get("name"),
             "prompt_template_version": prompt_version,
+            "review_depth": depth["label"],
             "markup_memory_enabled": bool(memory_context.get("enabled")),
             "markup_memory_positive_examples": len(memory_context.get("positive_examples") or []),
             "markup_memory_avoid_examples": len(memory_context.get("avoid_examples") or []),
+            "sheet_evidence_enabled": bool(sheet_evidence_context.get("enabled")),
+            "sheet_evidence_included": bool(sheet_evidence_context.get("included")),
+            "sheet_evidence_packet_count": int(sheet_evidence_context.get("packet_count") or 0),
+            "sheet_evidence_output_dir": sheet_evidence_context.get("output_dir"),
+            "sheet_evidence_warnings": sheet_evidence_context.get("warnings") or [],
         }
         prompt_run = self.db.insert_ai_prompt_run(
             project_id,
@@ -118,7 +189,15 @@ class AIReviewService:
             context.get("sheet_index", []),
             prompt_metadata,
         )
-        prompt = build_manual_prompt(payload, prompt_run, template, markup_memory_context=memory_context)
+        prompt = build_manual_prompt(
+            payload,
+            prompt_run,
+            template,
+            markup_memory_context=memory_context,
+            sheet_evidence_context=sheet_evidence_context,
+            review_depth=depth,
+            scope=scope,
+        )
         return {
             "project_id": project_id,
             "prompt_id": prompt_run["id"],
@@ -128,7 +207,52 @@ class AIReviewService:
             "payload_sheet_count": len(payload.get("sheets", [])),
             "instructions": "Copy this prompt into ChatGPT or Copilot Chat. Paste the returned JSON into AutoQC using Import AI Response.",
             "prompt_metadata": prompt_metadata,
+            "review_plan": self.build_manual_review_plan(project_id, batch_size=scope.get("batch_size") or DEFAULT_MANUAL_BATCH_SIZE),
         }
+
+    def build_manual_review_plan(self, project_id: str, batch_size: int | None = None) -> dict[str, Any]:
+        self.db.get_project(project_id)
+        sheets = self.db.list_sheets(project_id)
+        entities = self.db.list_entities(project_id)
+        batches = self.db.list_ai_import_batches(project_id, limit=500)
+        return build_hybrid_review_plan(project_id, sheets, entities, batches, batch_size)
+
+    def build_sheet_evidence_prompt_context(self, project_id: str, scope: dict[str, Any]) -> dict[str, Any]:
+        if not getattr(self.settings, "use_sheet_evidence", False):
+            return {"enabled": False, "included": False, "prompt_section": "", "warnings": ["Sheet Evidence Builder is disabled."]}
+        try:
+            project = self.db.get_project(project_id)
+            sheets = self.db.list_sheets(project_id)
+            source_path = require_project_source_pdf_path(self.settings.data_dir, project_id, project.get("source_pdf_path"))
+            scope_pages = [int(page) for page in scope.get("scope_pages") or [] if _positive_int(page)]
+            if not scope_pages:
+                scope_pages = [int(sheet.get("page_number") or 0) for sheet in sheets if _positive_int(sheet.get("page_number"))]
+            max_pages = int(getattr(self.settings, "sheet_evidence_prompt_max_pages", 80) or 0)
+            if max_pages > 0:
+                scope_pages = scope_pages[:max_pages]
+            benchmark_root = self.settings.repo_root / ".local" / "autoqc_extraction_benchmark"
+            recommendation = analyze_benchmark_run(find_latest_benchmark_run(benchmark_root), allow_fallback=True)
+            output_root = self.settings.repo_root / ".local" / "autoqc_sheet_evidence" / "app_prompts"
+            builder = SheetEvidenceBuilder(recommendation=recommendation, output_root=output_root)
+            result = builder.build_pdfs([source_path], mode="full", pages=scope_pages or None, max_pages=None)
+            packets = result.get("packets") or []
+            return {
+                "enabled": True,
+                "included": bool(packets),
+                "prompt_section": package_prompt_context(packets),
+                "packet_count": len(packets),
+                "output_dir": result.get("run_dir"),
+                "warnings": [item.get("name") for item in result.get("validation", []) if not item.get("passed")],
+            }
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "included": False,
+                "prompt_section": "",
+                "packet_count": 0,
+                "output_dir": None,
+                "warnings": [f"Sheet Evidence Builder failed safely: {exc}"],
+            }
 
     def preview_manual_response(
         self,
@@ -149,6 +273,9 @@ class AIReviewService:
             "schema_version": parser_report.get("schema_version"),
             "parser_mode": parser_report.get("parser_mode"),
             "response_shape": parser_report.get("response_shape"),
+            "ai_tool": "manual_chat_prompt",
+            "ai_provider": "manual_external",
+            "ai_model": None,
             **prompt_metadata,
         }
         preview = build_import_preview(
@@ -178,20 +305,16 @@ class AIReviewService:
                 "valid_count": preview["valid_recoverable_updates"],
                 "skipped_count": preview["skipped_updates"],
                 "duplicate_count": preview["duplicate_updates"],
-                "import_status": "previewed" if preview["valid_recoverable_updates"] else "failed",
+                "import_status": "previewed",
                 "preview": preview,
                 "metadata": parser_metadata,
             },
         )
         batch_summary = dict(batch)
         batch_summary.pop("preview", None)
+        batch_summary = public_ai_import_batch(batch_summary)
         preview["batch"] = batch_summary
         preview["batch_id"] = batch["id"]
-        if preview["valid_recoverable_updates"] == 0:
-            reason = preview["warnings"][0] if preview["warnings"] else "No importable AI updates were found."
-            raise ValueError(
-                f"AI response did not contain any updates to import. AI import preview found zero importable updates. {reason} Check that the response has an updates array with valid page numbers and drawing update fields."
-            )
         return preview
 
     def import_manual_response(
@@ -216,6 +339,7 @@ class AIReviewService:
         preview = batch.get("preview") or {}
         if not preview:
             raise ValueError("AI import preview was not found or has expired. Run Preview AI Updates again.")
+        ensure_preview_review_coverage_complete(preview)
         ai_findings = [
             item.get("finding")
             for item in preview.get("updates", [])
@@ -224,21 +348,88 @@ class AIReviewService:
         ai_findings = [finding for finding in ai_findings if finding]
         ai_findings = self._enrich_imported_finding_locations(project_id, ai_findings)
         if not ai_findings:
+            if preview.get("scoped_review_complete"):
+                quality_report = build_import_quality_report(preview, [], self.db.list_sheets(project_id))
+                batch_metadata = dict(batch.get("metadata") or {})
+                batch_metadata["quality_report"] = quality_report
+                batch_metadata["review_coverage"] = preview.get("review_coverage")
+                batch_metadata["clean_review_pages"] = clean_pages_from_preview(preview)
+                batch = self.db.update_ai_import_batch(
+                    preview_id,
+                    {
+                        "created_count": 0,
+                        "updated_count": 0,
+                        "duplicate_count": int(preview.get("duplicate_updates") or 0),
+                        "import_status": "imported",
+                        "metadata": batch_metadata,
+                        "imported_at": utc_now_iso_safe(),
+                    },
+                )
+                self.db.insert_project_event(
+                    project_id,
+                    "review_coverage_confirmed",
+                    {
+                        "batch_id": preview_id,
+                        "review_coverage": preview.get("review_coverage"),
+                        "clean_review_pages": clean_pages_from_preview(preview),
+                    },
+                )
+                return {
+                    "project": self.db.get_project(project_id),
+                    "ai_findings_created": 0,
+                    "ai_updates_imported": 0,
+                    "raw_ai_count": int(preview.get("total_candidate_updates") or 0),
+                    "imported_stable_ids": [],
+                    "imported_finding_ids": [],
+                    "batch": public_ai_import_batch(batch),
+                    "quality_report": quality_report,
+                    "findings": self.db.list_findings(project_id, sources=["ai"]),
+                }
             raise ValueError("AI import preview contains zero valid updates to import. Run preview again and review the warnings.")
         existing = self.db.list_findings(project_id, sources=["ai"])
         existing_by_stable = {finding.get("stable_id"): finding for finding in existing}
         created_count = sum(1 for finding in ai_findings if finding.get("stable_id") not in existing_by_stable)
         updated_count = sum(1 for finding in ai_findings if finding.get("stable_id") in existing_by_stable)
-        self.db.replace_findings(project_id, merge_existing_ai_findings(existing, ai_findings), sources=["ai"])
-        stored_imported = _find_by_stable_ids(self.db.list_findings(project_id, sources=["ai"]), ai_findings)
-        batch = self.db.update_ai_import_batch(
-            preview_id,
+        try:
+            self.db.replace_findings(project_id, merge_existing_ai_findings(existing, ai_findings), sources=["ai"])
+            stored_imported = _find_by_stable_ids(self.db.list_findings(project_id, sources=["ai"]), ai_findings)
+            quality_report = build_import_quality_report(preview, stored_imported, self.db.list_sheets(project_id))
+            batch_metadata = dict(batch.get("metadata") or {})
+            batch_metadata["quality_report"] = quality_report
+            batch_metadata["review_coverage"] = preview.get("review_coverage")
+            batch_metadata["clean_review_pages"] = clean_pages_from_preview(preview)
+            batch = self.db.update_ai_import_batch(
+                preview_id,
+                {
+                    "created_count": created_count,
+                    "updated_count": updated_count,
+                    "duplicate_count": int(preview.get("duplicate_updates") or 0),
+                    "import_status": "imported",
+                    "metadata": batch_metadata,
+                    "imported_at": utc_now_iso_safe(),
+                },
+            )
+        except Exception as exc:
+            self._recover_failed_import(
+                project_id,
+                batch_id=preview_id,
+                existing_findings=existing,
+                preview=preview,
+                metadata=batch.get("metadata") if isinstance(batch.get("metadata"), dict) else {},
+                error=exc,
+                source_type=batch.get("source_type") or preview.get("source_type") or "unknown",
+                prompt_version=batch.get("prompt_version") or preview.get("prompt_version"),
+                prompt_id=batch.get("prompt_id"),
+                batch_exists=True,
+            )
+            raise
+        self.db.insert_project_event(
+            project_id,
+            "review_coverage_confirmed",
             {
-                "created_count": created_count,
-                "updated_count": updated_count,
-                "duplicate_count": int(preview.get("duplicate_updates") or 0),
-                "import_status": "imported",
-                "imported_at": utc_now_iso_safe(),
+                "batch_id": preview_id,
+                "review_coverage": preview.get("review_coverage"),
+                "clean_review_pages": clean_pages_from_preview(preview),
             },
         )
         return {
@@ -248,7 +439,8 @@ class AIReviewService:
             "raw_ai_count": int(preview.get("total_candidate_updates") or len(ai_findings)),
             "imported_stable_ids": [finding["stable_id"] for finding in ai_findings],
             "imported_finding_ids": [finding["id"] for finding in stored_imported],
-            "batch": batch,
+            "batch": public_ai_import_batch(batch),
+            "quality_report": quality_report,
             "findings": self.db.list_findings(project_id, sources=["ai"]),
         }
 
@@ -348,60 +540,224 @@ class AIReviewService:
         payload = build_ai_payload(project, sheets, entities, existing, self.settings.ai_max_sheets)
         ai_response = self.client.review(payload)
         batch_id = str(uuid.uuid4())
+        direct_cap_applied = len(payload.get("sheets") or []) < len(sheets)
+        sent_pages = [
+            int(sheet.get("page_number"))
+            for sheet in payload.get("sheets") or []
+            if _positive_int(sheet.get("page_number"))
+        ]
+        direct_warnings = [
+            "Direct AI Review is experimental and text-context-only. It is not equivalent to the manual PDF-attached Chat Prompt workflow.",
+        ]
+        if direct_cap_applied:
+            direct_warnings.append(
+                f"Direct AI Review sent {len(payload.get('sheets') or [])} of {len(sheets)} sheets because AUTOQC_AI_MAX_SHEETS is {self.settings.ai_max_sheets}."
+            )
+        parser_metadata = {
+            "schema_version": schema_version_from_response(ai_response),
+            "parser_mode": "direct_ai_response",
+            "response_shape": response_shape_from_response(ai_response),
+            "review_scope": "batch" if direct_cap_applied else "package",
+            "scope_pages": sent_pages if direct_cap_applied else [],
+            "source_of_truth": "extracted_text_context",
+            "ai_tool": "direct_ai_review",
+            "ai_provider": self.settings.ai_provider or "openai",
+            "ai_model": self.settings.ai_model or None,
+            "direct_review_mode": "text_context_only",
+            "direct_review_warning": direct_warnings[0],
+            "direct_review_sheet_limit_applied": direct_cap_applied,
+            "direct_review_sent_sheet_count": len(payload.get("sheets") or []),
+            "direct_review_total_sheet_count": len(sheets),
+            "direct_review_sent_pages": sent_pages,
+            "ai_max_sheets": self.settings.ai_max_sheets,
+        }
         preview = build_import_preview(
             project_id=project_id,
             sheets=sheets,
             response=ai_response,
             existing_findings=existing,
             parser_repairs=[],
-            parser_warnings=[],
+            parser_warnings=direct_warnings,
             batch_id=batch_id,
             prompt_version="direct_ai_review",
             source_type="direct_ai",
             prompt_id=None,
+            parser_metadata=parser_metadata,
         )
+        ensure_preview_review_coverage_complete(preview)
         ai_findings = [
             item["finding"]
             for item in preview.get("updates", [])
             if isinstance(item, dict) and item.get("will_import") and isinstance(item.get("finding"), dict)
         ]
-        batch = self.db.create_ai_import_batch(
-            project_id,
-            {
-                "id": batch_id,
-                "source_type": "direct_ai",
-                "prompt_version": "direct_ai_review",
-                "raw_response_text": json.dumps(ai_response, ensure_ascii=True),
-                "parser_warnings": preview["warnings"],
-                "parser_repairs": preview["parser_repairs_applied"],
-                "candidate_count": preview["total_candidate_updates"],
-                "valid_count": preview["valid_recoverable_updates"],
-                "skipped_count": preview["skipped_updates"],
-                "created_count": sum(1 for finding in ai_findings if finding.get("stable_id") not in {item.get("stable_id") for item in existing}),
-                "updated_count": sum(1 for finding in ai_findings if finding.get("stable_id") in {item.get("stable_id") for item in existing}),
-                "duplicate_count": preview["duplicate_updates"],
-                "import_status": "imported",
-                "imported_at": utc_now_iso_safe(),
-                "preview": preview,
-            },
-        )
-        self.db.replace_findings(project_id, merge_existing_ai_findings(existing, ai_findings), sources=["ai"])
+        ai_findings = self._enrich_imported_finding_locations(project_id, ai_findings)
+        quality_report = build_import_quality_report(preview, ai_findings, sheets)
+        batch_metadata = {
+            **parser_metadata,
+            "warnings": direct_warnings,
+            "quality_report": quality_report,
+            "review_coverage": preview.get("review_coverage"),
+            "clean_review_pages": clean_pages_from_preview(preview),
+        }
+        batch_payload = {
+            "id": batch_id,
+            "source_type": "direct_ai",
+            "prompt_version": "direct_ai_review",
+            "raw_response_text": json.dumps(ai_response, ensure_ascii=True),
+            "parser_warnings": preview["warnings"],
+            "parser_repairs": preview["parser_repairs_applied"],
+            "candidate_count": preview["total_candidate_updates"],
+            "valid_count": preview["valid_recoverable_updates"],
+            "skipped_count": preview["skipped_updates"],
+            "created_count": sum(1 for finding in ai_findings if finding.get("stable_id") not in {item.get("stable_id") for item in existing}),
+            "updated_count": sum(1 for finding in ai_findings if finding.get("stable_id") in {item.get("stable_id") for item in existing}),
+            "duplicate_count": preview["duplicate_updates"],
+            "import_status": "imported",
+            "imported_at": utc_now_iso_safe(),
+            "preview": preview,
+            "metadata": batch_metadata,
+        }
+        try:
+            self.db.replace_findings(project_id, merge_existing_ai_findings(existing, ai_findings), sources=["ai"])
+            batch = self.db.create_ai_import_batch(project_id, batch_payload)
+        except Exception as exc:
+            self._recover_failed_import(
+                project_id,
+                batch_id=batch_id,
+                existing_findings=existing,
+                preview=preview,
+                metadata=batch_metadata,
+                error=exc,
+                source_type="direct_ai",
+                prompt_version="direct_ai_review",
+                prompt_id=None,
+                batch_exists=False,
+                raw_response_text=batch_payload["raw_response_text"],
+            )
+            raise
         stored_imported = _find_by_stable_ids(self.db.list_findings(project_id, sources=["ai"]), ai_findings)
         return {
             "project": self.db.get_project(project_id),
+            "direct_review_mode": "text_context_only",
+            "direct_review_sheet_limit_applied": direct_cap_applied,
+            "direct_review_sent_sheet_count": len(payload.get("sheets") or []),
+            "direct_review_total_sheet_count": len(sheets),
+            "warnings": direct_warnings,
             "ai_findings_created": len(ai_findings),
             "ai_updates_imported": len(ai_findings),
             "raw_ai_count": len(coerce_findings(ai_response)),
             "imported_stable_ids": [finding["stable_id"] for finding in ai_findings],
             "imported_finding_ids": [finding["id"] for finding in stored_imported],
-            "batch": batch,
+            "batch": public_ai_import_batch(batch),
+            "quality_report": quality_report,
             "findings": self.db.list_findings(project_id, sources=["ai"]),
         }
+
+    def _recover_failed_import(
+        self,
+        project_id: str,
+        *,
+        batch_id: str,
+        existing_findings: list[dict[str, Any]],
+        preview: dict[str, Any],
+        metadata: dict[str, Any],
+        error: Exception,
+        source_type: str,
+        prompt_version: str | None,
+        prompt_id: str | None,
+        batch_exists: bool,
+        raw_response_text: str | None = None,
+    ) -> None:
+        failed_at = utc_now_iso_safe()
+        failure_metadata = {
+            **(metadata or {}),
+            "import_failure": {
+                "message": str(error),
+                "failed_at": failed_at,
+                "recovery": "restored_prior_ai_findings",
+            },
+            "review_coverage": preview.get("review_coverage"),
+        }
+        try:
+            self.db.replace_findings(project_id, existing_findings, sources=["ai"])
+        except Exception:
+            failure_metadata["import_failure"]["recovery"] = "restore_prior_ai_findings_failed"
+        try:
+            if batch_exists:
+                self.db.update_ai_import_batch(
+                    batch_id,
+                    {
+                        "import_status": "failed",
+                        "metadata": failure_metadata,
+                    },
+                )
+            else:
+                self.db.create_ai_import_batch(
+                    project_id,
+                    {
+                        "id": batch_id,
+                        "source_type": source_type,
+                        "prompt_version": prompt_version,
+                        "prompt_id": prompt_id,
+                        "raw_response_text": raw_response_text,
+                        "parser_warnings": preview.get("warnings") or [],
+                        "parser_repairs": preview.get("parser_repairs_applied") or [],
+                        "candidate_count": preview.get("total_candidate_updates") or 0,
+                        "valid_count": preview.get("valid_recoverable_updates") or 0,
+                        "skipped_count": preview.get("skipped_updates") or 0,
+                        "duplicate_count": preview.get("duplicate_updates") or 0,
+                        "import_status": "failed",
+                        "preview": preview,
+                        "metadata": failure_metadata,
+                    },
+                )
+            self.db.insert_project_event(
+                project_id,
+                "ai_import_failed",
+                {"batch_id": batch_id, "source_type": source_type, "message": str(error)},
+            )
+        except Exception:
+            pass
+
+
+def public_ai_import_batch(batch: dict[str, Any]) -> dict[str, Any]:
+    item = dict(batch)
+    raw = item.pop("raw_response_text", None)
+    raw_text = raw if isinstance(raw, str) else ""
+    item["raw_response_stored"] = bool(raw_text)
+    item["raw_response_length"] = len(raw_text)
+    item["raw_response_sha256"] = hashlib.sha256(raw_text.encode("utf-8")).hexdigest() if raw_text else None
+    return item
 
 
 def _find_by_stable_ids(stored_findings: list[dict[str, Any]], imported_findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     imported_stable_ids = {finding["stable_id"] for finding in imported_findings}
     return [finding for finding in stored_findings if finding.get("stable_id") in imported_stable_ids]
+
+
+def ensure_preview_review_coverage_complete(preview: dict[str, Any]) -> None:
+    coverage = preview.get("review_coverage") if isinstance(preview.get("review_coverage"), dict) else preview
+    status = str(coverage.get("review_coverage_status") or "not_confirmed")
+    if status == "complete":
+        return
+    missing = coverage.get("missing_review_pages") or []
+    incomplete = coverage.get("incomplete_review_pages") or []
+    not_readable = coverage.get("not_readable_pages") or []
+    details = []
+    if missing:
+        details.append(f"missing reviewed_pages confirmation for pages {format_page_list([int(page) for page in missing])}")
+    if incomplete:
+        details.append(f"incomplete pages {format_page_list([int(page) for page in incomplete])}")
+    if not_readable:
+        details.append(f"not-readable pages {format_page_list([int(page) for page in not_readable])}")
+    if not details:
+        details.append("reviewed_pages was not confirmed")
+    raise ValueError(
+        "AI import blocked because review coverage is "
+        f"{status}. AutoQC requires every expected page to be listed in reviewed_pages with review_status complete before import. "
+        + "; ".join(details)
+        + "."
+    )
 
 
 def prompt_metadata_for_import(db: Database, project_id: str, prompt_id: str | None) -> dict[str, Any]:
@@ -414,7 +770,20 @@ def prompt_metadata_for_import(db: Database, project_id: str, prompt_id: str | N
     metadata = prompt_run.get("metadata") if isinstance(prompt_run.get("metadata"), dict) else {}
     return {
         key: metadata.get(key)
-        for key in ["prompt_template_id", "prompt_template_name", "prompt_template_version"]
+        for key in [
+            "prompt_template_id",
+            "prompt_template_name",
+            "prompt_template_version",
+            "review_strategy",
+            "review_scope",
+            "scope_pages",
+            "scope_label",
+            "scope_sheet_count",
+            "batch_size",
+            "batch_index",
+            "batch_count",
+            "deep_dive_reason",
+        ]
         if metadata.get(key)
     }
 
@@ -424,7 +793,7 @@ def merge_existing_ai_findings(existing: list[dict[str, Any]], incoming: list[di
     return [finding for finding in existing if finding.get("stable_id") not in incoming_stable_ids] + incoming
 
 
-SYSTEM_PROMPT = """You are an expert natural gas drawing QC reviewer. Return only valid JSON with a top-level updates array. Identify drawing updates needed; do not write finished markup comments. Create specific, evidence-backed updates only. Avoid repeated title-block, parser, or OCR noise. Every update must include issue, severity, category, page_number, target_text, required_update, rationale, and confidence."""
+SYSTEM_PROMPT = """You are an expert natural gas drawing QC reviewer using extracted text context only. Return only valid JSON with reviewed_pages and a top-level updates array. Identify drawing updates needed; do not write finished markup comments. Create specific, evidence-backed updates only. Avoid repeated title-block, parser, or OCR noise. Every update must include issue, severity, category, page_number, target_text, required_update, rationale, and confidence. Every reviewed page must be listed in reviewed_pages with review_status complete, incomplete, or not_readable."""
 
 
 def build_ai_payload(
@@ -433,9 +802,17 @@ def build_ai_payload(
     entities: list[dict[str, Any]],
     existing_findings: list[dict[str, Any]],
     max_sheets: int,
+    scope_pages: list[int] | None = None,
+    review_scope: str = "package",
 ) -> dict[str, Any]:
     sheet_payload = []
-    for sheet in sheets[:max_sheets]:
+    scope_set = {int(page) for page in scope_pages or []}
+    selected_sheets = [
+        sheet
+        for sheet in sheets
+        if not scope_set or int(sheet.get("page_number") or 0) in scope_set
+    ][:max_sheets]
+    for sheet in selected_sheets:
         sheet_payload.append(
             {
                 "sheet_id": sheet.get("id"),
@@ -452,6 +829,12 @@ def build_ai_payload(
     return {
         "task": "Perform an expert AI QC review of a natural gas drawing package. Return only JSON drawing updates.",
         "project": {"id": project.get("id"), "name": project.get("name"), "sheet_count": len(sheets)},
+        "scope": {
+            "review_scope": review_scope,
+            "scope_pages": sorted(scope_set),
+            "scope_sheet_count": len(selected_sheets),
+            "full_package_sheet_count": len(sheets),
+        },
         "review_guidance": {
             "find": [
                 "real discrepancies between sheets, tags, notes, and drawing references",
@@ -487,12 +870,14 @@ def build_ai_payload(
                 "normalized_text": item.get("normalized_text"),
                 "page_number": item.get("page_number"),
             }
-            for item in entities[:250]
-        ],
+            for item in entities
+            if not scope_set or int(item.get("page_number") or 0) in scope_set
+        ][:250],
         "existing_findings_summary": [
             {"title": item.get("title"), "page_number": item.get("page_number"), "comment_text": item.get("comment_text")}
-            for item in existing_findings[:80]
-        ],
+            for item in existing_findings
+            if not scope_set or int(item.get("page_number") or 0) in scope_set
+        ][:80],
     }
 
 
@@ -501,6 +886,9 @@ def build_manual_prompt(
     prompt_run: dict[str, Any] | None = None,
     template: dict[str, Any] | None = None,
     markup_memory_context: dict[str, Any] | None = None,
+    sheet_evidence_context: dict[str, Any] | None = None,
+    review_depth: dict[str, str] | None = None,
+    scope: dict[str, Any] | None = None,
 ) -> str:
     context = manual_prompt_context(payload)
     template = template or {}
@@ -524,32 +912,92 @@ def build_manual_prompt(
             "- Misspellings, grammar issues, unclear notes, duplicate notes, and conflicting requirements.\n"
             "- Natural gas regulator station review items only when visible evidence exists in the attached PDF."
         )
+    review_depth = review_depth or normalize_prompt_depth(template.get("review_depth") if template else None)
     memory_section = ""
     if markup_memory_context and markup_memory_context.get("enabled") and markup_memory_context.get("prompt_section"):
         memory_section = f"\n\n{markup_memory_context['prompt_section']}\n"
+    sheet_evidence_section = ""
+    if sheet_evidence_context and sheet_evidence_context.get("included") and sheet_evidence_context.get("prompt_section"):
+        sheet_evidence_section = f"\n\n{sheet_evidence_context['prompt_section']}\n"
+    scope = scope or {
+        "review_scope": str((payload.get("scope") or {}).get("review_scope") or "package"),
+        "scope_pages": (payload.get("scope") or {}).get("scope_pages") or [],
+        "scope_label": "Full package",
+    }
+    scope_section = build_scope_prompt_section(scope)
     return (
-        "You are acting as the AI Deep Review engine for AutoQC, a natural gas drawing QC tracker. This prompt is intended to be pasted into ChatGPT or Copilot Chat.\n"
+        "You are acting as the AI Deep Manual Review engine for AutoQC, a natural gas drawing QC tracker. This prompt is intended to be pasted into ChatGPT or Copilot Chat.\n"
         f"Prompt version: {context.get('prompt', {}).get('prompt_version', CHAT_PROMPT_VERSION)}.\n\n"
         f"Prompt template: {template.get('name', 'Default AutoQC Deep Review prompt')} ({template.get('id', 'default-deep-review')}).\n\n"
+        f"Review depth: {review_depth['label']}. {review_depth['instruction']}\n"
+        "Review every visible sheet, note, callout, table, title block, revision block, plan, detail, section, diagram, PFD, P&ID, BOM, legend, symbol, and drawing reference in the attached PDF package.\n"
+        "Do not triage, sample, skim, or only review high-risk sheets.\n\n"
         "IMPORTANT: The actual drawing package PDF must be attached/uploaded to this chat. Review the attached PDF package itself. Do not rely on this prompt alone as the drawing source of truth.\n\n"
+        f"{scope_section}\n"
         "Return ONLY valid JSON. Do not use markdown. Do not include commentary before or after the JSON.\n\n"
         "Your job is to identify drawing updates needed. Do not write finished PDF markup comments. AutoQC will convert your updates into markups after I paste your JSON back into the app.\n\n"
         "Review priorities:\n"
-        f"{priority_lines}\n"
-        "- Title block/revision issues only when visible in the actual attached PDF, not merely because metadata says UNKNOWN.\n\n"
-        "Rules:\n"
-        "- Every update must have a page_number and target_text copied from the attached PDF.\n"
-        "- target_text should be the exact note/callout/word AutoQC can search for when creating markups.\n"
-        "- Only report updates supported by visible evidence in the attached PDF. Do not invent code requirements, company standards, missing equipment, missing sheets, design defects, or title-block problems from general expectations, metadata, sheet titles, OCR status, or UNKNOWN values.\n"
+        f"{priority_lines}\n\n"
+        "MANDATORY REVIEW METHOD:\n"
+        "You must perform a deep manual-style review of the entire attached PDF package, regardless of sheet count.\n\n"
+        "For every sheet in the package:\n\n"
+        "1. Read the extracted page text for the entire sheet.\n"
+        "2. Visually inspect the rendered sheet image.\n"
+        "3. Review the title block, drawing number, sheet title, revision, issue date, revision block, clouds, triangles, and visible sheet identifiers.\n"
+        "4. Review all visible notes, callouts, tables, legends, references, bubbles, tags, symbols, dimensions, labels, and section/detail references.\n"
+        "5. Compare the extracted text against the visible sheet image before reporting issues.\n"
+        "6. Only report issues with visible evidence on the attached PDF sheet.\n"
+        "7. Do not skip sheets because the package is long.\n"
+        "8. Do not rely only on text extraction for sheets with diagrams, plans, tables, title blocks, PFDs, P&IDs, or visual coordination information.\n"
+        "9. Do not rely only on the rendered image when extracted text is available for notes or tables.\n"
+        "10. If you cannot review every sheet with both extracted text and visual inspection, return an incomplete-review error instead of producing partial findings.\n\n"
+        "PACKAGE-LEVEL REVIEW METHOD:\n"
+        "After reviewing sheets individually, perform cross-sheet coordination checks across the full package:\n\n"
+        "1. Drawing references and sheet references.\n"
+        "2. Section/detail callouts and destination details.\n"
+        "3. Tags, line numbers, equipment identifiers, valve numbers, instrument tags, SCADA tags, regulator tags, relief/OPP references, and BOM item numbers.\n"
+        "4. General notes versus plans/details/PFD/P&ID requirements.\n"
+        "5. Sheet index, drawing titles, drawing numbers, revision information, and visible title block consistency.\n"
+        "6. PFD/P&ID/plan/detail/isometric/BOM coordination.\n"
+        "7. Civil, mechanical, structural, electrical, environmental, and permitting coordination where visible.\n"
+        "8. Duplicate, stale, conflicting, or copy-pasted notes across sheets.\n"
+        "9. Missing or inconsistent references only when visibly supported by the attached PDF.\n\n"
+        "HARD NO-TRIAGE RULE:\n"
+        "Do not say or imply that long packages require prioritization. Do not review only likely issue sheets. Do not skip low-risk sheets. Do not only review notes sheets, P&IDs, or plans. Every sheet must receive the same baseline review method: extracted text review plus rendered visual inspection.\n\n"
+        "INCOMPLETE REVIEW RULE:\n"
+        "If the PDF package is not attached, not readable, only partially accessible, too large to inspect completely, missing rendered page images, missing usable extracted text for critical text-heavy sheets, or otherwise cannot be reviewed sheet-by-sheet using the mandatory review method, return this JSON exactly:\n\n"
+        "{\n"
+        "\"schema_version\": \"autoqc-ai-updates-v1\",\n"
+        "\"updates\": [],\n"
+        "\"error\": \"Full exhaustive manual-style review could not be completed. Attach a readable PDF package or split the package into smaller review batches.\"\n"
+        "}\n\n"
+        "If the package is readable but too long to complete in one response, do not provide partial findings. Return the incomplete-review error above.\n\n"
+        "Source-of-truth rules:\n"
+        "- The attached PDF is the source of truth.\n"
+        "- AutoQC context, metadata, sheet index, parser output, OCR status, and UNKNOWN values are navigation only.\n"
+        "- Do not report OCR, parser, extraction-quality, or UNKNOWN metadata issues as drawing updates.\n"
+        "- Title block/revision issues only when visibly supported by the attached PDF.\n"
+        "- Every update must have page_number.\n"
+        "- Every update must have target_text copied exactly from the attached PDF.\n"
+        "- Every response must include reviewed_pages for the requested scope so AutoQC can tell reviewed-clean pages from skipped pages.\n"
+        "- Only report issues supported by visible evidence.\n"
+        "- Do not invent code requirements, company standards, missing equipment, missing sheets, design defects, or title-block problems from general expectations.\n"
         "- If evidence is uncertain, either skip the item or use category \"human review needed\" with a clear uncertainty rationale.\n"
-        "- Do not report OCR, parser, extraction-quality, or UNKNOWN metadata issues as drawing updates. Treat AutoQC context as navigation only.\n"
-        "- Create title-block/revision updates only when the attached PDF visibly shows a real missing, conflicting, or incorrect title-block value.\n"
-        "- If the PDF package is not attached or not readable in this chat, return {\"updates\": [], \"error\": \"Attach the actual drawing package PDF before review.\"}.\n"
-        "- If there are no good updates, return {\"updates\": []}.\n\n"
+        "- If there are no good updates after completing the full exhaustive review, return:\n"
+        "  {\"schema_version\": \"autoqc-ai-updates-v1\", \"updates\": [], \"reviewed_pages\": [{\"page_number\": 1, \"review_status\": \"complete\", \"issue_count\": 0}]}\n\n"
         f"{memory_section}"
+        f"{sheet_evidence_section}"
         "Required response schema:\n"
         "{\n"
         "  \"schema_version\": \"autoqc-ai-updates-v1\",\n"
+        "  \"reviewed_pages\": [\n"
+        "    {\n"
+        "      \"page_number\": 1,\n"
+        "      \"review_status\": \"complete | incomplete | not_readable\",\n"
+        "      \"issue_count\": 0,\n"
+        "      \"notes\": \"optional short note if incomplete or not_readable\"\n"
+        "    }\n"
+        "  ],\n"
         "  \"updates\": [\n"
         "    {\n"
         "      \"issue\": \"short description of the issue\",\n"
@@ -563,10 +1011,42 @@ def build_manual_prompt(
         "    }\n"
         "  ]\n"
         "}\n\n"
+        "AI RESPONSE SELF-CHECK BEFORE FINAL JSON:\nBefore returning JSON, silently verify:\n\n"
+        "1. Every sheet in the attached PDF was reviewed using both extracted text and visual inspection.\n"
+        "2. Every update is supported by visible evidence in the attached PDF.\n"
+        "3. Every update has page_number.\n"
+        "4. Every update has exact target_text copied from the attached PDF.\n"
+        "5. Every update has required_update and rationale.\n"
+        "6. reviewed_pages includes every requested page in this prompt's scope.\n"
+        "7. No update relies only on parser metadata, sheet index data, OCR/extraction status, or UNKNOWN metadata.\n"
+        "8. No update relies on unsupported assumptions, invented code requirements, invented company standards, or design expectations not visibly supported by the attached PDF.\n"
+        "9. No title block/revision item is included unless visibly supported in the attached PDF.\n"
+        "10. No issue is included merely because a checklist item is generally expected.\n"
+        "11. If the full manual-style review was not completed for every requested page, return the incomplete-review error instead of partial findings.\n\n"
         "Minimal AutoQC project context only, not the drawing source of truth:\n"
         f"{json.dumps(context, ensure_ascii=False, indent=2)}\n\n"
-        "Final reminder: use the attached PDF, not this sheet index, as evidence. Return only the JSON object with the updates array."
+        "Final reminder: Use the attached PDF, not the sheet index, as evidence. Return only the JSON object with the updates array."
     )
+
+
+def normalize_prompt_depth(value: Any) -> dict[str, str]:
+    if value is None:
+        return PROMPT_DEPTH_OPTIONS["exhaustive"]
+    text = str(value or "standard").strip().lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "fast-review": "fast",
+        "fast": "fast",
+        "standard-review": "standard",
+        "standard": "standard",
+        "comprehensive-review": "comprehensive",
+        "comprehensive": "comprehensive",
+        "exhaustive-manual-style-review": "exhaustive",
+        "exhaustive-deep-review": "exhaustive",
+        "exhaustive": "exhaustive",
+        "deep": "exhaustive",
+    }
+    key = aliases.get(text, "standard")
+    return PROMPT_DEPTH_OPTIONS[key]
 
 
 def manual_prompt_context(payload: dict[str, Any]) -> dict[str, Any]:
@@ -585,7 +1065,318 @@ def manual_prompt_context(payload: dict[str, Any]) -> dict[str, Any]:
             }
             for sheet in sheets
         ],
+        "scope": payload.get("scope") if isinstance(payload.get("scope"), dict) else {"review_scope": "package"},
     }
+
+
+def build_scope_prompt_section(scope: dict[str, Any]) -> str:
+    review_scope = str(scope.get("review_scope") or "package")
+    pages = [int(page) for page in scope.get("scope_pages") or [] if _positive_int(page)]
+    label = str(scope.get("scope_label") or format_scope_label(pages) or "Full package")
+    if review_scope == "sheet" and pages:
+        reasons = scope.get("deep_dive_reason")
+        reason_text = f" Deep-dive reason: {reasons}." if reasons else ""
+        return (
+            "SCOPED REVIEW MODE: Single-sheet deep dive.\n"
+            f"Review only PDF page {pages[0]} ({label}). The full PDF is attached only for navigation and cross-reference context.\n"
+            "Slow down on this one sheet. Check spelling, notes, tables, references, tags, title block, revisions, callouts, dimensions, symbols, and visible coordination issues.\n"
+            "Do not return updates from other pages unless the cited target_text is on this requested page."
+            f"{reason_text}\n"
+            f"reviewed_pages must include page {pages[0]} with review_status complete, incomplete, or not_readable."
+        )
+    if review_scope == "batch" and pages:
+        return (
+            "SCOPED REVIEW MODE: Adaptive page batch.\n"
+            f"Review only these PDF pages: {format_page_list(pages)} ({label}). The full PDF is attached only for navigation and cross-reference context.\n"
+            "Use other pages only to verify references from the requested pages. Do not report updates whose target_text is outside the requested page list.\n"
+            "Review each requested page independently enough that reviewed_pages can confirm every requested page."
+        )
+    return (
+        "SCOPED REVIEW MODE: Whole package.\n"
+        "Review the entire attached PDF package. For very large packages, AutoQC may instead generate adaptive batch or single-sheet prompts to improve recall."
+    )
+
+
+def resolve_manual_review_scope(
+    sheets: list[dict[str, Any]],
+    review_scope: str | None,
+    page_number: int | None,
+    page_numbers: str | list[int] | None,
+    batch_size: int | None,
+) -> dict[str, Any]:
+    sorted_sheets = sorted(sheets, key=lambda item: int(item.get("page_number") or 0))
+    valid_pages = [int(sheet.get("page_number") or 0) for sheet in sorted_sheets if _positive_int(sheet.get("page_number"))]
+    valid_page_set = set(valid_pages)
+    normalized_scope = normalize_review_scope(review_scope)
+    normalized_batch_size = normalize_manual_batch_size(batch_size)
+    parsed_pages = parse_page_numbers(page_numbers)
+    if page_number is not None:
+        parsed_pages = [int(page_number), *parsed_pages]
+    parsed_pages = [page for page in list(dict.fromkeys(parsed_pages)) if page in valid_page_set]
+
+    if normalized_scope == "sheet":
+        if not parsed_pages:
+            raise ValueError("Choose a PDF page number before generating a single-sheet deep-dive prompt.")
+        page = parsed_pages[0]
+        sheet = next((item for item in sorted_sheets if int(item.get("page_number") or 0) == page), None)
+        return {
+            "review_scope": "sheet",
+            "review_strategy": "single_sheet_deep_dive",
+            "scope_pages": [page],
+            "scope_label": sheet_scope_label(sheet, [page]),
+            "batch_size": 1,
+            "batch_index": None,
+            "batch_count": None,
+            "deep_dive_reason": deep_dive_reason_text(sheet, []),
+        }
+
+    if normalized_scope == "batch":
+        if not parsed_pages:
+            parsed_pages = valid_pages[:normalized_batch_size]
+        if not parsed_pages:
+            raise ValueError("No valid PDF pages were available for the batch prompt.")
+        batches = chunk_pages(valid_pages, normalized_batch_size)
+        batch_index = next((index for index, batch in enumerate(batches, start=1) if parsed_pages[0] in batch), None)
+        return {
+            "review_scope": "batch",
+            "review_strategy": "adaptive_batch_review",
+            "scope_pages": parsed_pages,
+            "scope_label": format_scope_label(parsed_pages),
+            "batch_size": normalized_batch_size,
+            "batch_index": batch_index,
+            "batch_count": len(batches),
+            "deep_dive_reason": None,
+        }
+
+    return {
+        "review_scope": "package",
+        "review_strategy": "sheet_by_sheet_deep_dive_single_output",
+        "scope_pages": [],
+        "scope_label": "Full package",
+        "batch_size": normalized_batch_size,
+        "batch_index": None,
+        "batch_count": len(chunk_pages(valid_pages, normalized_batch_size)),
+        "deep_dive_reason": None,
+    }
+
+
+def build_hybrid_review_plan(
+    project_id: str,
+    sheets: list[dict[str, Any]],
+    entities: list[dict[str, Any]],
+    import_batches: list[dict[str, Any]],
+    batch_size: int | None = None,
+) -> dict[str, Any]:
+    normalized_batch_size = normalize_manual_batch_size(batch_size)
+    sorted_sheets = sorted(sheets, key=lambda item: int(item.get("page_number") or 0))
+    pages = [int(sheet.get("page_number") or 0) for sheet in sorted_sheets if _positive_int(sheet.get("page_number"))]
+    page_statuses = page_review_statuses(import_batches)
+    page_updates = pages_with_imported_or_importable_updates(import_batches)
+    batches = []
+    for index, page_group in enumerate(chunk_pages(pages, normalized_batch_size), start=1):
+        reviewed = [page for page in page_group if page_statuses.get(page) == "reviewed"]
+        status = "reviewed" if len(reviewed) == len(page_group) else "partial" if reviewed else "unreviewed"
+        batches.append(
+            {
+                "id": f"batch-{index:03d}",
+                "label": format_scope_label(page_group),
+                "page_numbers": page_group,
+                "batch_index": index,
+                "batch_count": len(chunk_pages(pages, normalized_batch_size)),
+                "status": status,
+                "reviewed_pages": reviewed,
+            }
+        )
+
+    entities_by_page: dict[int, int] = {}
+    for entity in entities:
+        page = _positive_int(entity.get("page_number"))
+        if page:
+            entities_by_page[page] = entities_by_page.get(page, 0) + 1
+
+    deep_dive_candidates = []
+    for sheet in sorted_sheets:
+        page = _positive_int(sheet.get("page_number"))
+        if not page:
+            continue
+        reasons = deep_dive_reasons(sheet, entities_by_page.get(page, 0))
+        if reasons and page_statuses.get(page) == "reviewed" and page not in page_updates and any("text-heavy" in reason for reason in reasons):
+            reasons.append("prior batch returned no updates for this dense page")
+        if not reasons:
+            continue
+        deep_dive_candidates.append(
+            {
+                "sheet_id": sheet.get("id"),
+                "page_number": page,
+                "drawing_number": sheet.get("drawing_number"),
+                "sheet_title": sheet.get("sheet_title"),
+                "sheet_type": sheet.get("sheet_type"),
+                "label": sheet_scope_label(sheet, [page]),
+                "reasons": reasons,
+                "score": len(reasons),
+                "status": "reviewed" if page_statuses.get(page) == "sheet_reviewed" else "unreviewed",
+            }
+        )
+
+    reviewed_pages = sorted(page for page, status in page_statuses.items() if status in {"reviewed", "sheet_reviewed"})
+    review_coverage = project_review_coverage_summary(sheets, import_batches)
+    return {
+        "project_id": project_id,
+        "sheet_count": len(sorted_sheets),
+        "batch_size": normalized_batch_size,
+        "batches": batches,
+        "deep_dive_candidates": sorted(deep_dive_candidates, key=lambda item: (-int(item.get("score") or 0), int(item.get("page_number") or 0))),
+        "reviewed_pages": reviewed_pages,
+        "unreviewed_pages": [page for page in pages if page not in reviewed_pages],
+        "review_coverage": review_coverage,
+        "review_coverage_status": review_coverage["review_coverage_status"],
+        "review_coverage_percent": review_coverage["review_coverage_percent"],
+    }
+
+
+def normalize_review_scope(value: str | None) -> str:
+    normalized = str(value or "package").strip().lower().replace("_", "-")
+    if normalized in {"adaptive", "adaptive-batch", "batch", "batches"}:
+        return "batch"
+    if normalized in {"page", "single", "sheet", "single-sheet", "deep-dive"}:
+        return "sheet"
+    return "package"
+
+
+def normalize_manual_batch_size(value: int | None) -> int:
+    try:
+        size = int(value or DEFAULT_MANUAL_BATCH_SIZE)
+    except (TypeError, ValueError):
+        size = DEFAULT_MANUAL_BATCH_SIZE
+    if size in ALLOWED_MANUAL_BATCH_SIZES:
+        return size
+    return min(ALLOWED_MANUAL_BATCH_SIZES, key=lambda allowed: abs(allowed - size))
+
+
+def parse_page_numbers(value: str | list[int] | None) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = re.findall(r"\d+", str(value))
+    pages: list[int] = []
+    for raw in raw_values:
+        page = _positive_int(raw)
+        if page and page not in pages:
+            pages.append(page)
+    return pages
+
+
+def chunk_pages(pages: list[int], batch_size: int) -> list[list[int]]:
+    if batch_size <= 0:
+        batch_size = DEFAULT_MANUAL_BATCH_SIZE
+    return [pages[index : index + batch_size] for index in range(0, len(pages), batch_size)]
+
+
+def format_page_list(pages: list[int]) -> str:
+    return ", ".join(str(page) for page in pages)
+
+
+def format_scope_label(pages: list[int]) -> str:
+    if not pages:
+        return "Full package"
+    if len(pages) == 1:
+        return f"Page {pages[0]}"
+    return f"Pages {pages[0]}-{pages[-1]}" if pages == list(range(pages[0], pages[-1] + 1)) else f"Pages {format_page_list(pages)}"
+
+
+def sheet_scope_label(sheet: dict[str, Any] | None, pages: list[int]) -> str:
+    if not sheet:
+        return format_scope_label(pages)
+    drawing_number = str(sheet.get("drawing_number") or "").strip()
+    title = str(sheet.get("sheet_title") or "").strip()
+    label = format_scope_label(pages)
+    if drawing_number and drawing_number.upper() not in {"UNKNOWN", "N/A", "NA"}:
+        label = f"{label} {drawing_number}"
+    if title and title.lower() not in {"unknown", "unknown sheet"}:
+        label = f"{label} - {title}"
+    return label
+
+
+def deep_dive_reason_text(sheet: dict[str, Any] | None, fallback: list[str]) -> str | None:
+    reasons = deep_dive_reasons(sheet or {}, 0) or fallback
+    return "; ".join(reasons) if reasons else None
+
+
+def deep_dive_reasons(sheet: dict[str, Any], entity_count: int) -> list[str]:
+    text = str(sheet.get("text_content") or "")
+    sheet_type = str(sheet.get("sheet_type") or "").lower()
+    extraction_status = str(sheet.get("extraction_status") or "").lower()
+    ocr_status = str(sheet.get("ocr_status") or "").lower()
+    reasons: list[str] = []
+    if len(text) >= TEXT_HEAVY_DEEP_DIVE_CHARS:
+        reasons.append("text-heavy sheet")
+    if sheet_type in DEEP_DIVE_SHEET_TYPES:
+        reasons.append(f"{sheet_type} sheet type")
+    if table_heavy_text(text):
+        reasons.append("BOM/table-heavy content")
+    if titleblock_revision_heavy_text(text):
+        reasons.append("title-block/revision-heavy content")
+    if entity_count >= HIGH_ENTITY_DEEP_DIVE_COUNT:
+        reasons.append("high tag/reference count")
+    if extraction_status in {"no_text", "weak_text", "failed"} or ocr_status in {"ocr_unavailable", "failed"}:
+        reasons.append("weak extraction/OCR status")
+    return list(dict.fromkeys(reasons))
+
+
+def table_heavy_text(text: str) -> bool:
+    lower = text.lower()
+    if any(token in lower for token in ["bill of material", "bill of materials", "bom", "item no", "qty", "quantity"]):
+        return True
+    return len(re.findall(r"\b(?:item|qty|quantity|description|material|size|spec)\b", lower)) >= 8
+
+
+def titleblock_revision_heavy_text(text: str) -> bool:
+    lower = text.lower()
+    return len(re.findall(r"\b(?:revision|rev|date|drawn|checked|approved|title block|sheet title|drawing no)\b", lower)) >= 6
+
+
+def page_review_statuses(import_batches: list[dict[str, Any]]) -> dict[int, str]:
+    statuses: dict[int, str] = {}
+    for batch in import_batches:
+        if batch.get("import_status") != "imported":
+            continue
+        metadata = batch.get("metadata") if isinstance(batch.get("metadata"), dict) else {}
+        preview = batch.get("preview") if isinstance(batch.get("preview"), dict) else {}
+        review_scope = str(metadata.get("review_scope") or preview.get("review_scope") or "")
+        for page in reviewed_pages_from_preview(preview):
+            statuses[page] = "sheet_reviewed" if review_scope == "sheet" else "reviewed"
+    return statuses
+
+
+def reviewed_pages_from_preview(preview: dict[str, Any]) -> list[int]:
+    pages: list[int] = []
+    coverage = preview.get("review_coverage") if isinstance(preview.get("review_coverage"), dict) else {}
+    for page in coverage.get("reviewed_pages_confirmed") or []:
+        page_number = _positive_int(page)
+        if page_number and page_number not in pages:
+            pages.append(page_number)
+    if pages:
+        return pages
+    for item in preview.get("reviewed_pages") or []:
+        if not isinstance(item, dict):
+            continue
+        page = _positive_int(item.get("page_number"))
+        status = str(item.get("review_status") or "").lower()
+        if page and status == "complete" and page not in pages:
+            pages.append(page)
+    return pages
+
+
+def pages_with_imported_or_importable_updates(import_batches: list[dict[str, Any]]) -> set[int]:
+    pages: set[int] = set()
+    for batch in import_batches:
+        preview = batch.get("preview") if isinstance(batch.get("preview"), dict) else {}
+        for update in preview.get("updates") or []:
+            if isinstance(update, dict) and update.get("will_import") and _positive_int(update.get("page_number")):
+                pages.add(int(update["page_number"]))
+    return pages
 
 
 def build_import_preview(
@@ -604,12 +1395,36 @@ def build_import_preview(
     items = coerce_findings(response)
     updates: list[dict[str, Any]] = []
     warnings = list(dict.fromkeys(parser_warnings))
+    parser_metadata = parser_metadata or {}
+    review_scope = parser_metadata.get("review_scope") or "package"
+    scope_pages = normalize_scope_pages(parser_metadata.get("scope_pages"), sheets)
+    expected_review_pages = expected_review_pages_for_scope(
+        sheets,
+        review_scope=review_scope,
+        scope_pages=scope_pages,
+    )
+    reviewed_pages = normalize_reviewed_pages(response.get("reviewed_pages"), sheets)
+    coverage = build_review_coverage_summary(expected_review_pages, reviewed_pages)
+    reviewed_page_numbers = list(coverage["reviewed_pages_confirmed"])
+    pages_without_review_confirmation = list(coverage["missing_review_pages"])
+    scoped_review_complete = coverage["review_coverage_status"] == "complete"
     if not items and response.get("error"):
         warnings.append(f"AI response error: {clean_text(response.get('error'), 'Unknown AI response error.')}")
-    if not items:
+    if not items and not scoped_review_complete:
         warnings.append("No updates array or update-shaped objects were found in the AI response.")
+    if pages_without_review_confirmation:
+        warnings.append(
+            f"AI response did not confirm every expected page in reviewed_pages. Missing: {format_page_list(pages_without_review_confirmation)}."
+        )
+    if coverage["incomplete_review_pages"]:
+        warnings.append(
+            f"AI marked these expected pages incomplete: {format_page_list(coverage['incomplete_review_pages'])}."
+        )
+    if coverage["not_readable_pages"]:
+        warnings.append(
+            f"AI marked these expected pages not readable: {format_page_list(coverage['not_readable_pages'])}."
+        )
 
-    parser_metadata = parser_metadata or {}
     existing_by_stable = {finding.get("stable_id"): finding for finding in existing_findings}
     seen_stable_ids: set[str] = set()
     seen_signatures: dict[str, int] = {}
@@ -664,7 +1479,7 @@ def build_import_preview(
         if warning
     ]
     warnings = list(dict.fromkeys(warnings + update_warnings))
-    return {
+    preview = {
         "project_id": project_id,
         "source_type": source_type,
         "prompt_version": prompt_version,
@@ -672,6 +1487,22 @@ def build_import_preview(
         "schema_version": parser_metadata.get("schema_version") or response.get("schema_version") or "autoqc-ai-updates-v1",
         "parser_mode": parser_metadata.get("parser_mode") or "unknown",
         "response_shape": parser_metadata.get("response_shape") or "unknown",
+        "review_scope": review_scope,
+        "review_strategy": parser_metadata.get("review_strategy"),
+        "scope_pages": scope_pages,
+        "scope_label": parser_metadata.get("scope_label"),
+        "expected_review_pages": expected_review_pages,
+        "reviewed_pages": reviewed_pages,
+        "reviewed_page_numbers": reviewed_page_numbers,
+        "reviewed_pages_confirmed": reviewed_page_numbers,
+        "missing_review_pages": coverage["missing_review_pages"],
+        "incomplete_review_pages": coverage["incomplete_review_pages"],
+        "not_readable_pages": coverage["not_readable_pages"],
+        "review_coverage_status": coverage["review_coverage_status"],
+        "review_coverage_percent": coverage["review_coverage_percent"],
+        "review_coverage": coverage,
+        "pages_without_review_confirmation": pages_without_review_confirmation,
+        "scoped_review_complete": scoped_review_complete,
         "total_candidate_updates": len(items),
         "valid_recoverable_updates": valid_count,
         "skipped_updates": skipped_count,
@@ -680,6 +1511,189 @@ def build_import_preview(
         "warnings": warnings,
         "updates": updates,
     }
+    preview["quality_report"] = build_import_quality_report(preview, sheets=sheets)
+    return preview
+
+
+def build_import_quality_report(
+    preview: dict[str, Any],
+    imported_findings: list[dict[str, Any]] | None = None,
+    sheets: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    updates = [item for item in preview.get("updates", []) if isinstance(item, dict)]
+    imported_findings = imported_findings or []
+    page_numbers = sorted(
+        {
+            int(sheet.get("page_number"))
+            for sheet in (sheets or [])
+            if isinstance(sheet, dict) and _positive_int(sheet.get("page_number"))
+        }
+    )
+    scoped_pages = [
+        int(page)
+        for page in preview.get("scope_pages") or []
+        if _positive_int(page)
+    ]
+    if scoped_pages:
+        page_numbers = sorted(set(scoped_pages))
+    returned_pages = sorted(
+        {
+            int(update.get("page_number"))
+            for update in updates
+            if _positive_int(update.get("page_number"))
+        }
+    )
+    reviewed_pages = sorted(
+        {
+            int(item.get("page_number"))
+            for item in preview.get("reviewed_pages") or []
+            if isinstance(item, dict) and item.get("review_status") == "complete" and _positive_int(item.get("page_number"))
+        }
+    )
+    importable_pages = sorted(
+        {
+            int(update.get("page_number"))
+            for update in updates
+            if update.get("will_import") and _positive_int(update.get("page_number"))
+        }
+    )
+    imported_pages = sorted(
+        {
+            int(finding.get("page_number"))
+            for finding in imported_findings
+            if isinstance(finding, dict) and _positive_int(finding.get("page_number"))
+        }
+    )
+    coverage_pages = imported_pages or importable_pages
+    review_coverage = preview.get("review_coverage") if isinstance(preview.get("review_coverage"), dict) else {}
+    pages_without_returned_updates = [page for page in page_numbers if page not in returned_pages]
+    placement_statuses: list[str] = []
+    for finding in imported_findings:
+        if not isinstance(finding, dict):
+            continue
+        details = finding.get("placement_details")
+        details_status = details.get("placement_status") if isinstance(details, dict) else None
+        placement_statuses.append(str(finding.get("placement_status") or details_status or ""))
+    missing_page = 0
+    missing_target = 0
+    low_confidence = 0
+    for update in updates:
+        fields = set(update.get("missing_or_weak_fields") or [])
+        if not update.get("page_number") or "page_number" in fields:
+            missing_page += 1
+        if not clean_text(update.get("target_text"), "") or "target_text" in fields:
+            missing_target += 1
+        confidence = update.get("confidence")
+        if isinstance(confidence, (int, float)) and confidence < 0.6:
+            low_confidence += 1
+
+    exact = sum(1 for status in placement_statuses if status in {"exact_target_found", "manual_placement"})
+    return {
+        "total_updates_parsed": int(preview.get("total_candidate_updates") or len(updates)),
+        "total_importable_updates": int(preview.get("valid_recoverable_updates") or 0),
+        "imported_findings": len(imported_findings),
+        "skipped_updates": int(preview.get("skipped_updates") or 0),
+        "duplicate_count": int(preview.get("duplicate_updates") or 0),
+        "missing_page_number_count": missing_page,
+        "missing_target_text_count": missing_target,
+        "exact_placement_count": exact,
+        "fuzzy_placement_count": sum(1 for status in placement_statuses if status == "fuzzy_target_found"),
+        "page_level_fallback_count": sum(1 for status in placement_statuses if status == "page_level_fallback"),
+        "manual_placement_needed_count": sum(1 for status in placement_statuses if status == "manual_placement_needed"),
+        "low_confidence_count": low_confidence,
+        "page_count": len(page_numbers),
+        "expected_review_pages": review_coverage.get("expected_review_pages") or page_numbers,
+        "reviewed_pages_confirmed": review_coverage.get("reviewed_pages_confirmed") or reviewed_pages,
+        "missing_review_pages": review_coverage.get("missing_review_pages") or list(preview.get("pages_without_review_confirmation") or []),
+        "incomplete_review_pages": review_coverage.get("incomplete_review_pages") or [],
+        "not_readable_pages": review_coverage.get("not_readable_pages") or [],
+        "review_coverage_status": review_coverage.get("review_coverage_status") or ("complete" if bool(preview.get("scoped_review_complete")) else "not_confirmed"),
+        "review_coverage_percent": review_coverage.get("review_coverage_percent") or 0.0,
+        "pages_with_returned_updates": returned_pages,
+        "pages_with_importable_updates": importable_pages,
+        "pages_with_imported_updates": imported_pages,
+        "pages_with_updates": coverage_pages,
+        "pages_reviewed": reviewed_pages,
+        "pages_without_review_confirmation": list(preview.get("pages_without_review_confirmation") or []),
+        "scoped_review_complete": bool(preview.get("scoped_review_complete")),
+        "pages_without_returned_updates": pages_without_returned_updates,
+        "pages_with_returned_updates_count": len(returned_pages),
+        "pages_with_imported_updates_count": len(coverage_pages),
+        "pages_without_returned_updates_count": len(pages_without_returned_updates),
+        "warnings": list(preview.get("warnings") or []),
+        "errors": [],
+    }
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def normalize_scope_pages(value: Any, sheets: list[dict[str, Any]]) -> list[int]:
+    valid_pages = {
+        int(sheet.get("page_number"))
+        for sheet in sheets
+        if isinstance(sheet, dict) and _positive_int(sheet.get("page_number"))
+    }
+    pages = parse_page_numbers(value)
+    return [page for page in pages if not valid_pages or page in valid_pages]
+
+
+def normalize_reviewed_pages(value: Any, sheets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    valid_pages = {
+        int(sheet.get("page_number"))
+        for sheet in sheets
+        if isinstance(sheet, dict) and _positive_int(sheet.get("page_number"))
+    }
+    reviewed: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            _, raw_page = first_present(item, ["page_number", "page", "pdf_page", "page_no", "pageNumber"])
+            page = coerce_page_number(raw_page)
+            raw_status = str(item.get("review_status") or item.get("status") or "complete").strip().lower()
+            issue_count_value = item.get("issue_count")
+            notes = clean_text(item.get("notes") or item.get("note"), "", max_length=240)
+        else:
+            page = coerce_page_number(item)
+            raw_status = "complete"
+            issue_count_value = None
+            notes = ""
+        if not page or (valid_pages and page not in valid_pages):
+            continue
+        status = {
+            "done": "complete",
+            "complete": "complete",
+            "completed": "complete",
+            "clean": "complete",
+            "none": "complete",
+            "incomplete": "incomplete",
+            "partial": "incomplete",
+            "not_readable": "not_readable",
+            "not-readable": "not_readable",
+            "unreadable": "not_readable",
+        }.get(raw_status, "complete")
+        try:
+            issue_count = int(issue_count_value if issue_count_value is not None else 0)
+        except (TypeError, ValueError):
+            issue_count = 0
+        reviewed.append(
+            {
+                "page_number": page,
+                "review_status": status,
+                "issue_count": max(0, issue_count),
+                "notes": notes,
+            }
+        )
+    deduped: dict[int, dict[str, Any]] = {}
+    for item in reviewed:
+        deduped[int(item["page_number"])] = item
+    return [deduped[page] for page in sorted(deduped)]
 
 
 def duplicate_signature(preview_item: dict[str, Any]) -> str | None:
@@ -1017,6 +2031,11 @@ def parse_json_object_with_report(content: str) -> dict[str, Any]:
     preferred = best_response_value_with_repairs(parsed_values)
     if preferred is not None:
         data, repairs = preferred
+        if "reviewed_pages" not in data:
+            loose_reviewed_pages = parse_loose_reviewed_pages(content)
+            if loose_reviewed_pages:
+                data["reviewed_pages"] = loose_reviewed_pages
+                repairs.append("Recovered loose reviewed_pages confirmation objects.")
         warnings = []
         if data.get("error"):
             warnings.append(f"AI response included error: {clean_text(data.get('error'), 'Unknown AI error')}")
@@ -1034,6 +2053,10 @@ def parse_json_object_with_report(content: str) -> dict[str, Any]:
     if loose_updates:
         repairs = list(dict.fromkeys(base_repairs + ["Recovered loose malformed update objects."]))
         data = {"updates": loose_updates}
+        loose_reviewed_pages = parse_loose_reviewed_pages(content)
+        if loose_reviewed_pages:
+            data["reviewed_pages"] = loose_reviewed_pages
+            repairs.append("Recovered loose reviewed_pages confirmation objects.")
         return {
             "data": data,
             "repairs": repairs,
@@ -1255,6 +2278,26 @@ def parse_loose_updates(content: str) -> list[dict[str, Any]]:
         ):
             updates.append(item)
     return updates
+
+
+def parse_loose_reviewed_pages(content: str) -> list[dict[str, Any]]:
+    text = normalize_chat_text(content)
+    array_match = re.search(r'"?reviewed_pages"?\s*:\s*\[', text, flags=re.S)
+    if not array_match:
+        return []
+    start = array_match.end()
+    end = matching_array_end(text, start - 1)
+    section = text[start:end]
+    reviewed: list[dict[str, Any]] = []
+    for obj in loose_update_objects(section):
+        item: dict[str, Any] = {}
+        for key in ["page_number", "page", "pdf_page", "page_no", "pageNumber", "review_status", "status", "issue_count", "notes", "note"]:
+            match = re.search(rf'"?{key}"?\s*:\s*(.*?)(?=,\s*"?(?:page_number|page|pdf_page|page_no|pageNumber|review_status|status|issue_count|notes|note)"?\s*:|\s*$)', obj, flags=re.S)
+            if match:
+                item[key] = clean_loose_value(match.group(1))
+        if item:
+            reviewed.append(item)
+    return reviewed
 
 
 LOOSE_UPDATE_KEYS = [

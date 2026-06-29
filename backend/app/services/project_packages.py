@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import uuid
 import zipfile
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+
+import fitz
 
 from backend.app.database import Database
 from backend.app.models import utc_now_iso
@@ -14,6 +18,9 @@ from backend.app.services.storage import require_project_source_pdf_path, safe_p
 
 
 PACKAGE_SCHEMA_VERSION = "autoqc-project-package-v1"
+MAX_PACKAGE_FILE_COUNT = 2000
+MAX_PACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+ALLOWED_PACKAGE_EXTENSIONS = {".json", ".pdf", ".png", ".csv", ".xlsx", ".md", ".html", ".txt"}
 
 
 class ProjectPackageService:
@@ -62,6 +69,7 @@ class ProjectPackageService:
                 if export_files:
                     file_manifest["exports"][export["id"]] = export_files
 
+            _strip_local_paths_from_payload(data)
             manifest = {
                 "schema_version": PACKAGE_SCHEMA_VERSION,
                 "package_id": package_id,
@@ -77,8 +85,10 @@ class ProjectPackageService:
                     "exports": len(data["exports"]),
                 },
             }
-            (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=True), encoding="utf-8")
             (staging / "project.json").write_text(json.dumps(data, indent=2, ensure_ascii=True), encoding="utf-8")
+            manifest["checksums"] = checksum_manifest(staging, manifest.get("file_manifest") or {})
+            manifest["checksums"]["project.json"] = sha256_file(staging / "project.json")
+            (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=True), encoding="utf-8")
 
             with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 for path in staging.rglob("*"):
@@ -110,6 +120,10 @@ class ProjectPackageService:
         return matches[0] if matches else None
 
     def import_project_package(self, package_file: Path, *, confirm_overwrite: bool = False) -> dict[str, Any]:
+        preview = self.preview_project_package(package_file)
+        if not preview.get("valid"):
+            first_error = preview.get("errors", ["Project package failed validation."])[0]
+            raise ValueError(str(first_error))
         with TemporaryDirectory() as temp_name:
             staging = Path(temp_name)
             try:
@@ -137,25 +151,106 @@ class ProjectPackageService:
                 id_map = self._build_id_map(data, remap=False)
             restored_project_id = id_map["projects"].get(original_project_id, original_project_id)
             project_dir = self.data_dir / "projects" / restored_project_id
-            project_dir.mkdir(parents=True, exist_ok=True)
-            restored = self._remap_payload(data, id_map)
-            self._restore_files(staging, manifest.get("file_manifest") or {}, restored, project_dir)
-            self._insert_payload(restored)
-            self.db.insert_project_event(
-                restored_project_id,
-                "project_package_imported",
-                {
-                    "original_project_id": original_project_id,
-                    "restored_project_id": restored_project_id,
-                    "remapped_ids": restored_project_id != original_project_id,
-                    "source_package": package_file.name,
-                },
-            )
+            project_dir_existed = project_dir.exists()
+            project_existed = self._project_exists(restored_project_id)
+            try:
+                project_dir.mkdir(parents=True, exist_ok=True)
+                restored = self._remap_payload(data, id_map)
+                self._restore_files(staging, manifest.get("file_manifest") or {}, restored, project_dir)
+                self._insert_payload(restored)
+                self.db.insert_project_event(
+                    restored_project_id,
+                    "project_package_imported",
+                    {
+                        "original_project_id": original_project_id,
+                        "restored_project_id": restored_project_id,
+                        "remapped_ids": restored_project_id != original_project_id,
+                        "source_package": package_file.name,
+                    },
+                )
+            except Exception:
+                if not project_existed:
+                    try:
+                        self.db.delete_project(restored_project_id)
+                    except Exception:
+                        pass
+                if not project_dir_existed and project_dir.exists():
+                    shutil.rmtree(project_dir, ignore_errors=True)
+                raise
         return {
             "project": self.db.get_project(restored_project_id),
             "original_project_id": original_project_id,
             "restored_project_id": restored_project_id,
             "remapped_ids": restored_project_id != original_project_id,
+            "preview": preview,
+        }
+
+    def preview_project_package(self, package_file: Path) -> dict[str, Any]:
+        errors: list[str] = []
+        warnings: list[str] = []
+        manifest: dict[str, Any] = {}
+        data: dict[str, Any] = {}
+        source_pdf_included = False
+        source_pdf_valid = False
+
+        try:
+            with zipfile.ZipFile(package_file) as archive:
+                infos = archive.infolist()
+                _validate_zip_members(infos, errors)
+                if not errors:
+                    with TemporaryDirectory() as temp_name:
+                        staging = Path(temp_name)
+                        _safe_extract_zip(archive, staging)
+                        manifest_path = staging / "manifest.json"
+                        project_path = staging / "project.json"
+                        if not manifest_path.exists():
+                            errors.append("Package is missing manifest.json.")
+                        if not project_path.exists():
+                            errors.append("Package is missing project.json.")
+                        if not errors:
+                            manifest = _read_json_object(manifest_path, "manifest.json", errors)
+                            data = _read_json_object(project_path, "project.json", errors)
+                            _validate_manifest_and_payload(manifest, data, errors, warnings)
+                            file_manifest = manifest.get("file_manifest") if isinstance(manifest.get("file_manifest"), dict) else {}
+                            source_ref = file_manifest.get("source_pdf")
+                            if isinstance(source_ref, str):
+                                source_pdf_included = True
+                                source_pdf = (staging / source_ref).resolve()
+                                source_pdf_valid = _validate_pdf(source_pdf, errors, "source PDF")
+                            _validate_package_images(staging, file_manifest, errors)
+                            _validate_checksums(staging, manifest, warnings)
+        except zipfile.BadZipFile:
+            errors.append("Uploaded AutoQC project package is not a readable zip archive.")
+        except ValueError as exc:
+            errors.append(str(exc))
+        except Exception as exc:
+            errors.append(f"Package preview failed: {exc}")
+
+        project = data.get("project") if isinstance(data.get("project"), dict) else {}
+        original_project_id = str(project.get("id") or manifest.get("project_id") or "")
+        restored_project_id = original_project_id
+        remapped_ids = False
+        if original_project_id:
+            remapped_ids = self._project_exists(original_project_id)
+            restored_project_id = "new project ID will be assigned" if remapped_ids else original_project_id
+        file_manifest = manifest.get("file_manifest") if isinstance(manifest.get("file_manifest"), dict) else {}
+        export_artifact_count = _count_export_artifacts(file_manifest)
+        return {
+            "valid": not errors,
+            "schema_version": manifest.get("schema_version"),
+            "project_name": project.get("name") or manifest.get("project_name"),
+            "original_project_id": original_project_id,
+            "restored_project_id": restored_project_id,
+            "remapped_ids": remapped_ids,
+            "sheet_count": len(data.get("sheets") or []) if isinstance(data.get("sheets"), list) else 0,
+            "finding_count": len(data.get("findings") or []) if isinstance(data.get("findings"), list) else 0,
+            "import_batches_count": len(data.get("ai_import_batches") or []) if isinstance(data.get("ai_import_batches"), list) else 0,
+            "export_record_count": len(data.get("exports") or []) if isinstance(data.get("exports"), list) else 0,
+            "export_artifact_count": export_artifact_count,
+            "source_pdf_included": source_pdf_included,
+            "source_pdf_valid": source_pdf_valid,
+            "warnings": warnings,
+            "errors": errors,
         }
 
     def _project_payload(self, project_id: str) -> dict[str, Any]:
@@ -475,15 +570,205 @@ def prompt_row_from_db(row: Any) -> dict[str, Any]:
     return item
 
 
+def checksum_manifest(staging: Path, file_manifest: dict[str, Any]) -> dict[str, str]:
+    checksums: dict[str, str] = {}
+    refs: list[str] = []
+    source_pdf = file_manifest.get("source_pdf")
+    if isinstance(source_pdf, str):
+        refs.append(source_pdf)
+    sheet_images = file_manifest.get("sheet_images") if isinstance(file_manifest.get("sheet_images"), dict) else {}
+    refs.extend(value for value in sheet_images.values() if isinstance(value, str))
+    exports = file_manifest.get("exports") if isinstance(file_manifest.get("exports"), dict) else {}
+    for export_files in exports.values():
+        if isinstance(export_files, dict):
+            refs.extend(value for value in export_files.values() if isinstance(value, str))
+    for ref in sorted(dict.fromkeys(refs)):
+        path = (staging / ref).resolve()
+        try:
+            path.relative_to(staging.resolve())
+        except ValueError:
+            continue
+        if path.is_file():
+            checksums[ref] = sha256_file(path)
+    return checksums
+
+
+def _strip_local_paths_from_payload(data: dict[str, Any]) -> None:
+    project = data.get("project") if isinstance(data.get("project"), dict) else {}
+    project["source_pdf_path"] = None
+    for sheet in data.get("sheets") or []:
+        if isinstance(sheet, dict):
+            sheet["image_path"] = None
+    for export in data.get("exports") or []:
+        if not isinstance(export, dict):
+            continue
+        export["export_dir"] = None
+        for key in ["marked_pdf_path", "csv_path", "qa_report_path", "xlsx_path", "json_path", "summary_path", "html_path"]:
+            export[key] = None
+
+
+def _count_export_artifacts(file_manifest: dict[str, Any]) -> int:
+    exports = file_manifest.get("exports") if isinstance(file_manifest.get("exports"), dict) else {}
+    count = 0
+    for export_files in exports.values():
+        if isinstance(export_files, dict):
+            count += len([value for value in export_files.values() if isinstance(value, str) and value])
+    return count
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
     destination = destination.resolve()
     for member in archive.infolist():
+        _raise_for_unsafe_member(member.filename)
         target = (destination / member.filename).resolve()
         try:
             target.relative_to(destination)
         except ValueError as exc:
             raise ValueError("Package contains an unsafe file path.") from exc
     archive.extractall(destination)
+
+
+def _validate_zip_members(infos: list[zipfile.ZipInfo], errors: list[str]) -> None:
+    files = [info for info in infos if not info.is_dir()]
+    if len(files) > MAX_PACKAGE_FILE_COUNT:
+        errors.append(f"Package contains too many files ({len(files)} > {MAX_PACKAGE_FILE_COUNT}).")
+    total_size = sum(max(0, info.file_size) for info in files)
+    if total_size > MAX_PACKAGE_UNCOMPRESSED_BYTES:
+        errors.append("Package uncompressed size exceeds the AutoQC import limit.")
+    for info in files:
+        try:
+            _raise_for_unsafe_member(info.filename)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        suffix = Path(info.filename).suffix.lower()
+        if suffix not in ALLOWED_PACKAGE_EXTENSIONS:
+            errors.append(f"Package contains an unsupported file type: {info.filename}.")
+
+
+def _raise_for_unsafe_member(filename: str) -> None:
+    normalized = filename.replace("\\", "/")
+    if normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized:
+        raise ValueError("Package contains an unsafe file path.")
+    if re.match(r"^[A-Za-z]:", normalized):
+        raise ValueError("Package contains an absolute file path.")
+    parts = [part for part in normalized.split("/") if part]
+    if any(part == ".." for part in parts):
+        raise ValueError("Package contains a path traversal entry.")
+
+
+def _read_json_object(path: Path, label: str, errors: list[str]) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        errors.append(f"{label} is not readable JSON: {exc}")
+        return {}
+    if not isinstance(value, dict):
+        errors.append(f"{label} must contain a JSON object.")
+        return {}
+    return value
+
+
+def _validate_manifest_and_payload(
+    manifest: dict[str, Any],
+    data: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    if manifest.get("schema_version") != PACKAGE_SCHEMA_VERSION:
+        errors.append("Unsupported AutoQC project package schema version.")
+    project = data.get("project")
+    if not isinstance(project, dict):
+        errors.append("project.json is missing a project object.")
+        return
+    for key in ["id", "name"]:
+        if not project.get(key):
+            errors.append(f"project.json project is missing required field: {key}.")
+    for collection in ["sheets", "entities", "findings", "ai_prompt_runs", "ai_import_batches", "finding_events", "exports"]:
+        value = data.get(collection)
+        if value is None:
+            warnings.append(f"project.json is missing optional collection: {collection}.")
+            continue
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            errors.append(f"project.json collection {collection} must be an array of objects.")
+    for sheet in data.get("sheets") or []:
+        if not sheet.get("id") or not sheet.get("project_id") or not sheet.get("page_number"):
+            errors.append("At least one sheet is missing id, project_id, or page_number.")
+            break
+    for finding in data.get("findings") or []:
+        if finding.get("source") != "ai":
+            errors.append("Project packages may only restore AI-sourced user-facing findings.")
+            break
+        if not finding.get("id") or not finding.get("stable_id"):
+            errors.append("At least one finding is missing id or stable_id.")
+            break
+
+
+def _validate_pdf(path: Path, errors: list[str], label: str) -> bool:
+    if not path.is_file():
+        errors.append(f"Package {label} is referenced but missing.")
+        return False
+    try:
+        with fitz.open(path) as doc:
+            if len(doc) <= 0:
+                errors.append(f"Package {label} has no pages.")
+                return False
+    except Exception as exc:
+        errors.append(f"Package {label} is not a readable PDF: {exc}")
+        return False
+    return True
+
+
+def _validate_package_images(staging: Path, file_manifest: dict[str, Any], errors: list[str]) -> None:
+    sheet_images = file_manifest.get("sheet_images") if isinstance(file_manifest.get("sheet_images"), dict) else {}
+    for ref in sheet_images.values():
+        if not isinstance(ref, str):
+            continue
+        path = (staging / ref).resolve()
+        try:
+            path.relative_to(staging.resolve())
+        except ValueError:
+            errors.append("Package image reference points outside the archive.")
+            continue
+        if not path.is_file():
+            errors.append(f"Package image is referenced but missing: {ref}.")
+            continue
+        try:
+            pixmap = fitz.Pixmap(str(path))
+            if pixmap.width <= 0 or pixmap.height <= 0:
+                errors.append(f"Package image has invalid dimensions: {ref}.")
+        except Exception as exc:
+            errors.append(f"Package image is not readable: {ref}: {exc}")
+
+
+def _validate_checksums(staging: Path, manifest: dict[str, Any], warnings: list[str]) -> None:
+    checksums = manifest.get("checksums")
+    if not isinstance(checksums, dict):
+        warnings.append("Package manifest has no checksum block.")
+        return
+    for ref, expected in checksums.items():
+        if not isinstance(ref, str) or not isinstance(expected, str):
+            continue
+        path = (staging / ref).resolve()
+        try:
+            path.relative_to(staging.resolve())
+        except ValueError:
+            warnings.append(f"Checksum entry points outside package: {ref}.")
+            continue
+        if not path.is_file():
+            warnings.append(f"Checksum file missing from package: {ref}.")
+            continue
+        actual = sha256_file(path)
+        if actual.lower() != expected.lower():
+            warnings.append(f"Checksum mismatch for {ref}.")
 
 
 def safe_stem(name: str) -> str:

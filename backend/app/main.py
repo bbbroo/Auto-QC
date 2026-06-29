@@ -4,6 +4,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +15,34 @@ import fitz
 
 from backend.app.config import AI_PROVIDER_BASE_URLS, settings
 from backend.app.database import Database
-from backend.app.models import BulkFindingUpdate, ExportRequest, FindingUpdate, ManualAIImportRequest, ManualAIPreviewRequest, MergeFindingRequest, RollbackRequest
+from backend.app.models import (
+    BulkFindingUpdate,
+    ChecklistItemUpdate,
+    ChecklistSelectRequest,
+    ExportRequest,
+    FindingUpdate,
+    ManualAIImportRequest,
+    ManualAIPreviewRequest,
+    ManualPlacementRequest,
+    MergeFindingRequest,
+    RollbackRequest,
+)
 from backend.app.sample_pdf import ensure_default_sample_pdf
-from backend.app.services.ai_review import AIReviewService
+from backend.app.services.ai_review import AIReviewService, public_ai_import_batch
+from backend.app.services.checklists import ChecklistService
 from backend.app.services.exports import ExportService
 from backend.app.services.markup_memory import MEMORY_OUTCOMES, MarkupMemoryService
+from backend.app.services.placement_coordinates import (
+    display_rect_to_image_rect,
+    display_rect_to_pdf_rect,
+    image_rect_to_pdf_rect,
+    normalized_rect,
+    pdf_rect_to_image_rect,
+    pdf_rect_to_display_rect,
+)
 from backend.app.services.pdf_processor import PDFProcessor
 from backend.app.services.project_packages import ProjectPackageService
+from backend.app.services.review_coverage import project_review_coverage_summary
 from backend.app.services.storage import safe_project_source_pdf_path, safe_public_data_asset_path
 
 
@@ -32,6 +54,8 @@ export_service = ExportService(db, settings.data_dir)
 ai_review_service = AIReviewService(db, settings)
 package_service = ProjectPackageService(db, settings.data_dir)
 memory_service = MarkupMemoryService(db)
+checklist_service = ChecklistService(db)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Natural Gas Engineering Copilot",
@@ -164,6 +188,23 @@ async def import_project_package(file: UploadFile = File(...)) -> dict[str, Any]
         temp_path.unlink(missing_ok=True)
 
 
+@app.post("/project-packages/import/preview")
+async def preview_project_package_import(file: UploadFile = File(...)) -> dict[str, Any]:
+    suffix = Path(file.filename or "autoqc_project_package.zip").suffix.lower()
+    if suffix != ".zip":
+        raise HTTPException(status_code=400, detail="Import an AutoQC project package .zip file.")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as handle:
+        temp_path = Path(handle.name)
+        handle.write(await file.read())
+    try:
+        preview = package_service.preview_project_package(temp_path)
+        if not preview.get("valid"):
+            return preview
+        return preview
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 @app.post("/projects/{project_id}/review")
 def run_review(project_id: str) -> dict[str, Any]:
     try:
@@ -251,14 +292,17 @@ def save_ai_settings(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 @app.get("/readiness")
 def readiness() -> dict[str, Any]:
     checks = [
-        _readiness_check("Python/backend health", True, sys.version.split()[0]),
+        _readiness_check("Backend API alive", True, f"Python {sys.version.split()[0]}"),
         _readiness_check("Database writable", _writable_file(settings.db_path.parent), str(settings.db_path)),
         _readiness_check("Data directory writable", _writable_file(settings.data_dir), str(settings.data_dir)),
-        _readiness_check("Project source directory", (settings.data_dir / "projects").exists() or _writable_file(settings.data_dir / "projects"), str(settings.data_dir / "projects")),
-        _readiness_check("Export directory status", _writable_file(settings.data_dir / "projects"), "exports are created under data/projects/<project-id>/exports"),
-        _readiness_check("Playwright/browser tests", (settings.repo_root / "frontend" / "playwright.config.ts").exists(), "run cd frontend; npm run test:e2e"),
-        _readiness_check("Port 8000 available", _port_available(8000), "backend default port"),
-        _readiness_check("Port 5173 available", _port_available(5173), "frontend default port"),
+        _readiness_check("Project source folder writable", _writable_file(settings.data_dir / "projects"), str(settings.data_dir / "projects")),
+        _readiness_check("Export folders writable", _writable_file(settings.data_dir / "projects"), "exports are created under data/projects/<project-id>/exports"),
+        _readiness_check(
+            "Frontend app configured",
+            (settings.repo_root / "frontend" / "package.json").exists() and (settings.repo_root / "frontend" / "src" / "App.tsx").exists(),
+            "Running health does not require ports 8000/5173 to be free.",
+        ),
+        _readiness_check("Playwright/browser tests configured", (settings.repo_root / "frontend" / "playwright.config.ts").exists(), "run cd frontend; npm run test:e2e"),
     ]
     instructions = {
         "frontend_typecheck": "cd frontend; npm run typecheck",
@@ -269,6 +313,8 @@ def readiness() -> dict[str, Any]:
     }
     return {
         "status": "passed" if all(check["ok"] for check in checks) else "warning",
+        "mode": "running_app_health",
+        "summary": "Running app health checks. Port availability is checked by scripts/doctor.py before startup, not here.",
         "actor": "Local reviewer",
         "checks": checks,
         "instructions": instructions,
@@ -328,6 +374,41 @@ def preview_project_markup_memory_context(project_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Project not found") from exc
 
 
+@app.get("/checklists/templates")
+def list_checklist_templates() -> dict[str, Any]:
+    return {"templates": checklist_service.list_templates()}
+
+
+@app.get("/projects/{project_id}/checklist")
+def get_project_checklist(project_id: str) -> dict[str, Any]:
+    try:
+        db.get_project(project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Project not found") from exc
+    checklist = checklist_service.get_project_checklist(project_id)
+    return checklist or {"project_id": project_id, "items": [], "progress": None}
+
+
+@app.post("/projects/{project_id}/checklist/select")
+def select_project_checklist(project_id: str, request: ChecklistSelectRequest) -> dict[str, Any]:
+    try:
+        db.get_project(project_id)
+        return checklist_service.select_checklist(project_id, request.checklist_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Project or checklist not found") from exc
+
+
+@app.patch("/projects/{project_id}/checklist/items/{item_id}")
+def update_project_checklist_item(project_id: str, item_id: str, update: ChecklistItemUpdate) -> dict[str, Any]:
+    try:
+        db.get_project(project_id)
+        return checklist_service.update_item(project_id, item_id, update.model_dump(exclude_unset=True))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Project or checklist item not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/projects/{project_id}/ai-review")
 def run_ai_review(project_id: str) -> dict[str, Any]:
     try:
@@ -343,9 +424,35 @@ def run_ai_review(project_id: str) -> dict[str, Any]:
 
 
 @app.get("/projects/{project_id}/ai-review/manual-prompt")
-def get_manual_ai_prompt(project_id: str, template_id: str | None = None) -> dict[str, Any]:
+def get_manual_ai_prompt(
+    project_id: str,
+    template_id: str | None = None,
+    review_depth: str | None = None,
+    review_scope: str | None = None,
+    page_number: int | None = None,
+    page_numbers: str | None = None,
+    batch_size: int | None = None,
+) -> dict[str, Any]:
     try:
-        return ai_review_service.generate_manual_prompt(project_id, template_id=template_id)
+        return ai_review_service.generate_manual_prompt(
+            project_id,
+            template_id=template_id,
+            review_depth=review_depth,
+            review_scope=review_scope,
+            page_number=page_number,
+            page_numbers=page_numbers,
+            batch_size=batch_size,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Project not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/projects/{project_id}/ai-review/manual-review-plan")
+def get_manual_review_plan(project_id: str, batch_size: int | None = None) -> dict[str, Any]:
+    try:
+        return ai_review_service.build_manual_review_plan(project_id, batch_size=batch_size)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Project not found") from exc
 
@@ -393,7 +500,7 @@ def list_ai_import_batches(project_id: str) -> list[dict[str, Any]]:
         db.get_project(project_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Project not found") from exc
-    return db.list_ai_import_batches(project_id)
+    return [public_ai_import_batch(batch) for batch in db.list_ai_import_batches(project_id)]
 
 
 @app.post("/projects/{project_id}/ai-review/import-batches/{batch_id}/rollback-preview")
@@ -483,6 +590,130 @@ def update_finding(finding_id: str, update: FindingUpdate) -> dict[str, Any]:
     return finding
 
 
+@app.post("/findings/{finding_id}/manual-placement")
+def save_manual_finding_placement(finding_id: str, request: ManualPlacementRequest) -> dict[str, Any]:
+    finding = _get_ai_finding_or_404(finding_id)
+    try:
+        input_rect = normalized_rect([float(value) for value in request.rect])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Manual placement rectangle must contain four numbers.") from exc
+    if input_rect[2] - input_rect[0] < 2 or input_rect[3] - input_rect[1] < 2:
+        raise HTTPException(status_code=400, detail="Manual placement rectangle is too small.")
+
+    sheet = next((item for item in db.list_sheets(finding["project_id"]) if int(item.get("page_number") or 0) == request.page_number), {})
+    geometry = _manual_placement_geometry(finding["project_id"], request.page_number, sheet, request)
+    source_width = geometry["source_width"]
+    source_height = geometry["source_height"]
+    display_width = geometry["display_width"]
+    display_height = geometry["display_height"]
+    image_width = geometry["image_width"]
+    image_height = geometry["image_height"]
+    rotation = geometry["page_rotation"]
+
+    if request.coordinate_space == "image_pixel" and (image_width <= 0 or image_height <= 0):
+        raise HTTPException(status_code=400, detail="Manual image-pixel placement requires image_width and image_height.")
+
+    if request.coordinate_space == "pdf_unrotated":
+        pdf_rect = input_rect
+        page_display_rect = pdf_rect_to_display_rect(
+            pdf_rect,
+            source_width=source_width,
+            source_height=source_height,
+            rotation=rotation,
+        )
+        image_rect = pdf_rect_to_image_rect(
+            pdf_rect,
+            image_width=image_width or display_width,
+            image_height=image_height or display_height,
+            source_width=source_width,
+            source_height=source_height,
+            display_width=display_width,
+            display_height=display_height,
+            rotation=rotation,
+        )
+        stored_display_rect = page_display_rect
+    elif request.coordinate_space == "display_rotated":
+        page_display_rect = input_rect
+        pdf_rect = display_rect_to_pdf_rect(
+            page_display_rect,
+            source_width=source_width,
+            source_height=source_height,
+            rotation=rotation,
+        )
+        image_rect = display_rect_to_image_rect(
+            page_display_rect,
+            image_width=image_width or display_width,
+            image_height=image_height or display_height,
+            display_width=display_width,
+            display_height=display_height,
+        )
+        stored_display_rect = page_display_rect
+    else:
+        image_rect = input_rect
+        page_display_rect = []
+        pdf_rect = image_rect_to_pdf_rect(
+            image_rect,
+            image_width=image_width,
+            image_height=image_height,
+            source_width=source_width,
+            source_height=source_height,
+            display_width=display_width,
+            display_height=display_height,
+            rotation=rotation,
+        )
+        page_display_rect = pdf_rect_to_display_rect(
+            pdf_rect,
+            source_width=source_width,
+            source_height=source_height,
+            rotation=rotation,
+        )
+        stored_display_rect = image_rect
+
+    location = {
+        "bbox": image_rect,
+        "origin": "top_left",
+        "method": "manual_placement",
+        "coordinate_space": "image_pixel",
+        "manual_image_rect": image_rect,
+        "pdf_rect": pdf_rect,
+        "page_rotation": rotation,
+        "source_width": round(source_width, 2),
+        "source_height": round(source_height, 2),
+        "page_display_width": round(display_width, 2),
+        "page_display_height": round(display_height, 2),
+        "image_width": round(image_width, 2),
+        "image_height": round(image_height, 2),
+    }
+    placement_details = {
+        "placement_status": "manual_placement",
+        "target_found": True,
+        "exported": True,
+        "manual_placement_needed": False,
+        "method": "manual_placement",
+        "coordinate_space": "image_pixel",
+        "input_coordinate_space": request.coordinate_space,
+        "manual_image_rect_json": image_rect,
+        "rect_json": pdf_rect,
+        "pdf_rect_json": pdf_rect,
+        "display_rect_json": stored_display_rect,
+        "page_display_rect_json": page_display_rect,
+        "page_rotation": rotation,
+        "source_width": round(source_width, 2),
+        "source_height": round(source_height, 2),
+        "page_display_width": round(display_width, 2),
+        "page_display_height": round(display_height, 2),
+        "image_width": round(image_width, 2),
+        "image_height": round(image_height, 2),
+        "note": "Reviewer manually placed this markup rectangle in AutoQC.",
+    }
+    try:
+        updated = db.update_finding_manual_placement(finding_id, request.page_number, location, placement_details)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Finding not found") from exc
+    _collect_memory_safely(finding["project_id"], finding_id, "edited")
+    return updated
+
+
 @app.delete("/findings/{finding_id}")
 def delete_finding(finding_id: str) -> dict[str, str]:
     _get_ai_finding_or_404(finding_id)
@@ -505,6 +736,10 @@ def export_project(
             project_id,
             accepted_only=resolved_accepted_only,
             statuses=statuses,
+            export_mode=request.export_mode if request else "draft",
+            reviewer_name=request.reviewer_name if request else None,
+            final_export_confirmed=bool(request.final_export_confirmed) if request else False,
+            acknowledge_validation_warnings=bool(request.acknowledge_validation_warnings) if request else False,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Project not found") from exc
@@ -526,6 +761,9 @@ def export_project(
         "findings_exported": result["findings_exported"],
         "placement_summary": result.get("placement_summary"),
         "validation": result.get("validation"),
+        "export_mode": result.get("export_mode"),
+        "review_coverage": result.get("review_coverage"),
+        "signoff": result.get("signoff"),
     }
 
 
@@ -554,6 +792,13 @@ def _enrich_project(project: dict[str, Any]) -> dict[str, Any]:
     project["finding_status_counts"] = _count_by(findings, "status")
     project["finding_severity_counts"] = _count_by(findings, "severity")
     project["finding_category_counts"] = _count_by(findings, "category")
+    try:
+        project["review_coverage"] = project_review_coverage_summary(
+            db.list_sheets(project["id"]),
+            db.list_ai_import_batches(project["id"], limit=1000),
+        )
+    except Exception:
+        project["review_coverage"] = None
     return project
 
 
@@ -586,6 +831,49 @@ def _source_page_geometry(sheet: dict[str, Any]) -> dict[str, Any]:
             }
     except Exception:
         return {}
+
+
+def _manual_placement_geometry(
+    project_id: str,
+    page_number: int,
+    sheet: dict[str, Any],
+    request: ManualPlacementRequest,
+) -> dict[str, float | int]:
+    source_geometry = _source_page_geometry({"project_id": project_id, "page_number": page_number})
+    rotation = int(source_geometry.get("rotation") or sheet.get("rotation") or request.page_rotation or 0) % 360
+    source_width = float(source_geometry.get("source_width") or sheet.get("source_width") or request.source_width or sheet.get("width") or 0)
+    source_height = float(source_geometry.get("source_height") or sheet.get("source_height") or request.source_height or sheet.get("height") or 0)
+    natural_display_width = source_height if rotation in {90, 270} else source_width
+    natural_display_height = source_width if rotation in {90, 270} else source_height
+    display_width = float(source_geometry.get("width") or sheet.get("width") or request.display_width or natural_display_width or source_width or 0)
+    display_height = float(source_geometry.get("height") or sheet.get("height") or request.display_height or natural_display_height or source_height or 0)
+    stored_image_width, stored_image_height = _sheet_image_dimensions(sheet)
+    image_width = float(request.image_width or stored_image_width or 0)
+    image_height = float(request.image_height or stored_image_height or 0)
+    if image_width <= 0:
+        image_width = display_width
+    if image_height <= 0:
+        image_height = display_height
+    return {
+        "source_width": source_width,
+        "source_height": source_height,
+        "display_width": display_width,
+        "display_height": display_height,
+        "image_width": image_width,
+        "image_height": image_height,
+        "page_rotation": rotation,
+    }
+
+
+def _sheet_image_dimensions(sheet: dict[str, Any]) -> tuple[float | None, float | None]:
+    image_path = sheet.get("image_path")
+    if not image_path:
+        return None, None
+    try:
+        pixmap = fitz.Pixmap(str(image_path))
+        return float(pixmap.width), float(pixmap.height)
+    except Exception:
+        return None, None
 
 
 def _count_by(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
@@ -656,7 +944,15 @@ def _memory_outcome_for_update(fields: dict[str, Any]) -> str | None:
 def _collect_memory_safely(project_id: str, finding_id: str, outcome: str) -> None:
     try:
         memory_service.collect_memory_from_finding(project_id, finding_id, outcome)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Markup Memory capture failed for project_id=%s finding_id=%s outcome=%s: %s",
+            project_id,
+            finding_id,
+            outcome,
+            exc,
+            exc_info=True,
+        )
         return
 
 

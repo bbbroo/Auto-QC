@@ -6,6 +6,9 @@ import type {
   AISettingsRequest,
   BatchRollbackPreview,
   BulkFindingResponse,
+  ChecklistItem,
+  ChecklistItemUpdate,
+  ChecklistTemplate,
   ExportRequest,
   ExportResponse,
   Finding,
@@ -18,9 +21,13 @@ import type {
   MarkupMemoryStats,
   MergeFindingResponse,
   ManualAIPromptResponse,
+  ManualReviewPlan,
+  ManualReviewScope,
   PlacementRecalculateResponse,
+  ProjectChecklist,
   ProjectPackageExportResponse,
   ProjectPackageImportResponse,
+  ProjectPackageImportPreview,
   PromptTemplate,
   Project,
   ReadinessResponse,
@@ -184,6 +191,16 @@ export async function importProjectPackage(file: File): Promise<ProjectPackageIm
   return payload as ProjectPackageImportResponse;
 }
 
+export async function previewProjectPackageImport(file: File): Promise<ProjectPackageImportPreview> {
+  const body = new FormData();
+  body.append("file", file);
+  const payload = await request<unknown>("/project-packages/import/preview", {
+    method: "POST",
+    body,
+  });
+  return payload as ProjectPackageImportPreview;
+}
+
 export async function listSheets(projectId: string): Promise<Sheet[]> {
   const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/sheets`);
   return unwrapCollection<Sheet>(payload, ["sheets", "items"]);
@@ -224,10 +241,48 @@ export async function runAIReview(projectId: string): Promise<AIReviewResponse> 
   return unwrapItem<AIReviewResponse>(payload, "result");
 }
 
-export async function getManualAIPrompt(projectId: string, templateId?: string | null): Promise<ManualAIPromptResponse> {
-  const query = templateId ? `?template_id=${encodeURIComponent(templateId)}` : "";
+export async function getManualAIPrompt(
+  projectId: string,
+  templateId?: string | null,
+  reviewDepth?: string | null,
+  options: {
+    reviewScope?: ManualReviewScope | string | null;
+    pageNumber?: number | null;
+    pageNumbers?: number[] | null;
+    batchSize?: number | null;
+  } = {},
+): Promise<ManualAIPromptResponse> {
+  const params = new URLSearchParams();
+  if (templateId) {
+    params.set("template_id", templateId);
+  }
+  if (reviewDepth) {
+    params.set("review_depth", reviewDepth);
+  }
+  if (options.reviewScope) {
+    params.set("review_scope", options.reviewScope);
+  }
+  if (options.pageNumber) {
+    params.set("page_number", String(options.pageNumber));
+  }
+  if (options.pageNumbers?.length) {
+    params.set("page_numbers", options.pageNumbers.join(","));
+  }
+  if (options.batchSize) {
+    params.set("batch_size", String(options.batchSize));
+  }
+  const query = params.toString() ? `?${params.toString()}` : "";
   const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/ai-review/manual-prompt${query}`);
   return payload as ManualAIPromptResponse;
+}
+
+export async function getManualReviewPlan(projectId: string, batchSize?: number | null): Promise<ManualReviewPlan> {
+  const params = new URLSearchParams();
+  if (batchSize) {
+    params.set("batch_size", String(batchSize));
+  }
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<ManualReviewPlan>(`/projects/${encodeURIComponent(projectId)}/ai-review/manual-review-plan${query}`);
 }
 
 export async function listPromptTemplates(): Promise<PromptTemplate[]> {
@@ -333,6 +388,56 @@ export async function mergeFindingInto(findingId: string, targetFindingId: strin
   });
 }
 
+export async function saveManualPlacement(
+  findingId: string,
+  pageNumber: number,
+  rect: number[],
+  imageWidth: number,
+  imageHeight: number,
+): Promise<Finding> {
+  const payload = await request<unknown>(`/findings/${encodeURIComponent(findingId)}/manual-placement`, {
+    method: "POST",
+    body: JSON.stringify({
+      page_number: pageNumber,
+      rect,
+      coordinate_space: "image_pixel",
+      image_width: imageWidth,
+      image_height: imageHeight,
+    }),
+  });
+  return unwrapItem<Finding>(payload, "finding");
+}
+
+export async function listChecklistTemplates(): Promise<ChecklistTemplate[]> {
+  const payload = await request<unknown>("/checklists/templates");
+  return unwrapCollection<ChecklistTemplate>(payload, ["templates", "items"]);
+}
+
+export async function getProjectChecklist(projectId: string): Promise<ProjectChecklist> {
+  return request<ProjectChecklist>(`/projects/${encodeURIComponent(projectId)}/checklist`);
+}
+
+export async function selectProjectChecklist(projectId: string, checklistId: string): Promise<ProjectChecklist> {
+  return request<ProjectChecklist>(`/projects/${encodeURIComponent(projectId)}/checklist/select`, {
+    method: "POST",
+    body: JSON.stringify({ checklist_id: checklistId }),
+  });
+}
+
+export async function updateProjectChecklistItem(
+  projectId: string,
+  itemId: string,
+  update: ChecklistItemUpdate,
+): Promise<ChecklistItem> {
+  return request<ChecklistItem>(
+    `/projects/${encodeURIComponent(projectId)}/checklist/items/${encodeURIComponent(itemId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(update),
+    },
+  );
+}
+
 export async function getMarkupMemorySettings(): Promise<MarkupMemorySettings> {
   return request<MarkupMemorySettings>("/markup-memory/settings");
 }
@@ -405,6 +510,11 @@ function normalizeExportResponse(payload: unknown): ExportResponse {
     validation: typeof root.validation === "object" && root.validation
       ? root.validation as ExportResponse["validation"]
       : undefined,
+    export_mode: typeof root.export_mode === "string" ? root.export_mode : stringOrNull(exportRecord.export_mode) ?? undefined,
+    review_coverage: typeof root.review_coverage === "object" && root.review_coverage
+      ? root.review_coverage as ExportResponse["review_coverage"]
+      : undefined,
+    signoff: typeof root.signoff === "object" && root.signoff ? root.signoff as ExportResponse["signoff"] : null,
   };
 }
 

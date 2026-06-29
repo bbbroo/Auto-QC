@@ -14,4 +14,14 @@ playwright-report/
 *.sqlite-shm
 *.sqlite-wal
 *.tmp
+*.bak
+scripts/debug_*.py
+.ai-bridge/
+=/
+frontend/.vite/
+frontend/coverage/
+test-results/
+playwright/.cache/
 /examples/
+.local/
+backend/extraction_benchmark/results/

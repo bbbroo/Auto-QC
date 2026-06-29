@@ -213,6 +213,7 @@ class BulkFindingUpdate(BaseModel):
 
 
 class ExportRequest(BaseModel):
+    export_mode: Literal["draft", "final"] = "draft"
     statuses: list[
         Literal[
             "needs_review",
@@ -225,6 +226,9 @@ class ExportRequest(BaseModel):
         ]
     ] | None = Field(default=None, min_length=1)
     accepted_only: bool | None = None
+    reviewer_name: str | None = None
+    final_export_confirmed: bool = False
+    acknowledge_validation_warnings: bool = False
 
 
 MAX_AI_RESPONSE_CHARS = 2_000_000
@@ -257,6 +261,30 @@ class RollbackRequest(BaseModel):
 
 class MergeFindingRequest(BaseModel):
     target_finding_id: str
+
+
+class ManualPlacementRequest(BaseModel):
+    page_number: int = Field(ge=1)
+    rect: list[float] = Field(min_length=4, max_length=4)
+    coordinate_space: Literal["image_pixel", "pdf_unrotated", "display_rotated"] = "image_pixel"
+    image_width: float | None = Field(default=None, gt=0)
+    image_height: float | None = Field(default=None, gt=0)
+    display_width: float | None = None
+    display_height: float | None = None
+    page_rotation: int | None = None
+    source_width: float | None = None
+    source_height: float | None = None
+
+
+class ChecklistSelectRequest(BaseModel):
+    checklist_id: str
+
+
+class ChecklistItemUpdate(BaseModel):
+    status: Literal["not_started", "checked", "issue_found", "not_applicable", "needs_human_review"] | None = None
+    applicability: str | None = None
+    mapped_finding_ids: list[str] | None = None
+    reviewer_notes: str | None = None
 
 
 class ProjectPackageImportResponse(BaseModel):

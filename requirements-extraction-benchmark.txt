@@ -1,0 +1,16 @@
+# Optional local dependencies for backend/extraction_benchmark.
+# PyMuPDF is already listed in requirements.txt and is repeated here for standalone benchmark envs.
+PyMuPDF>=1.24
+pdfplumber>=0.11
+
+# Optional table extractor. Ghostscript may be required for some Camelot modes.
+camelot-py[cv]>=0.11; python_version < "3.13"
+
+# Heavy experimental tools are intentionally not pinned here because Windows/Python
+# compatibility varies significantly. Install selectively in an isolated env:
+#   pip install docling
+#   pip install marker-pdf
+#   pip install paddleocr
+#   pip install surya-ocr
+#   pip install magic-pdf
+

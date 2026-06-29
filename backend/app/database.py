@@ -215,8 +215,39 @@ class Database:
                     include_rejected_examples INTEGER NOT NULL DEFAULT 1,
                     include_accepted_examples INTEGER NOT NULL DEFAULT 1,
                     include_edited_examples INTEGER NOT NULL DEFAULT 1,
+                    include_current_project_examples INTEGER NOT NULL DEFAULT 0,
                     min_usefulness_score REAL NOT NULL DEFAULT 0,
                     advanced_feature_enabled INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS project_checklists (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    checklist_id TEXT NOT NULL,
+                    checklist_name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS project_checklist_items (
+                    id TEXT PRIMARY KEY,
+                    project_checklist_id TEXT NOT NULL REFERENCES project_checklists(id) ON DELETE CASCADE,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    checklist_id TEXT NOT NULL,
+                    checklist_name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    section TEXT NOT NULL,
+                    discipline TEXT,
+                    sheet_type TEXT,
+                    item_text TEXT NOT NULL,
+                    applicability TEXT NOT NULL DEFAULT 'applicable',
+                    status TEXT NOT NULL DEFAULT 'not_started',
+                    mapped_finding_ids_json TEXT,
+                    reviewer_notes TEXT,
+                    source_template_reference TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -249,6 +280,7 @@ class Database:
             self._ensure_column(conn, "ai_import_batches", "metadata_json", "TEXT")
             self._ensure_column(conn, "markup_memory_examples", "original_ai_json", "TEXT")
             self._ensure_column(conn, "markup_memory_settings", "max_avoid_examples_per_prompt", "INTEGER NOT NULL DEFAULT 5")
+            self._ensure_column(conn, "markup_memory_settings", "include_current_project_examples", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_markup_memory_settings(conn)
             conn.execute(
                 """
@@ -260,6 +292,18 @@ class Database:
                 """
                 CREATE INDEX IF NOT EXISTS idx_markup_memory_examples_outcome
                 ON markup_memory_examples(status_outcome, usefulness_score)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_checklists_project
+                ON project_checklists(project_id, updated_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_checklist_items_project
+                ON project_checklist_items(project_id, section, status)
                 """
             )
 
@@ -279,9 +323,10 @@ class Database:
                 id, enabled, include_in_prompts, max_examples_per_prompt,
                 max_avoid_examples_per_prompt, include_rejected_examples,
                 include_accepted_examples, include_edited_examples,
-                min_usefulness_score, advanced_feature_enabled, created_at, updated_at
+                include_current_project_examples, min_usefulness_score,
+                advanced_feature_enabled, created_at, updated_at
             )
-            VALUES (1, 0, 0, 8, 5, 1, 1, 1, 0, 0, ?, ?)
+            VALUES (1, 0, 0, 8, 5, 1, 1, 1, 0, 0, 0, ?, ?)
             """,
             (now, now),
         )
@@ -635,6 +680,52 @@ class Database:
                 """,
                 (placement_status, _json(placement_details), now, finding_id),
             )
+
+    def update_finding_manual_placement(
+        self,
+        finding_id: str,
+        page_number: int,
+        location: dict[str, Any],
+        placement_details: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now_iso()
+        with self.connect() as conn:
+            before_row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+            if before_row is None:
+                raise KeyError(finding_id)
+            before = self._finding_from_row(before_row)
+            sheet_id = self._sheet_id_for_page(conn, before["project_id"], page_number)
+            conn.execute(
+                """
+                UPDATE findings
+                SET page_number = ?, sheet_id = ?, location_json = ?, placement_status = ?,
+                    placement_details_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    page_number,
+                    sheet_id,
+                    _json(location),
+                    "manual_placement",
+                    _json(placement_details),
+                    now,
+                    finding_id,
+                ),
+            )
+            self._insert_finding_event(
+                conn,
+                project_id=before["project_id"],
+                finding_id=finding_id,
+                stable_id=before.get("stable_id"),
+                action="manual_placement_saved",
+                changes={
+                    "page_number": {"from": before.get("page_number"), "to": page_number},
+                    "location": location,
+                    "placement_status": "manual_placement",
+                },
+                created_at=now,
+            )
+        return self.get_finding(finding_id)
 
     def bulk_update_findings(self, finding_ids: list[str], fields: dict[str, Any]) -> list[dict[str, Any]]:
         return [self.update_finding(finding_id, fields, action="bulk_update") for finding_id in finding_ids]
@@ -1166,6 +1257,7 @@ class Database:
             "include_rejected_examples",
             "include_accepted_examples",
             "include_edited_examples",
+            "include_current_project_examples",
             "min_usefulness_score",
             "advanced_feature_enabled",
         }
@@ -1176,6 +1268,7 @@ class Database:
             "include_rejected_examples",
             "include_accepted_examples",
             "include_edited_examples",
+            "include_current_project_examples",
             "advanced_feature_enabled",
         }
         int_fields = {"max_examples_per_prompt", "max_avoid_examples_per_prompt"}
@@ -1370,6 +1463,166 @@ class Database:
             cursor = conn.execute("DELETE FROM markup_memory_examples")
         return int(cursor.rowcount or 0)
 
+    def select_project_checklist(self, project_id: str, template: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now_iso()
+        checklist_id = str(template["id"])
+        checklist_record_id = str(uuid.uuid4())
+        items = template.get("items") if isinstance(template.get("items"), list) else []
+        with self.connect() as conn:
+            self.get_project(project_id)
+            conn.execute("DELETE FROM project_checklist_items WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM project_checklists WHERE project_id = ?", (project_id,))
+            conn.execute(
+                """
+                INSERT INTO project_checklists (
+                    id, project_id, checklist_id, checklist_name, version, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    checklist_record_id,
+                    project_id,
+                    checklist_id,
+                    str(template.get("name") or checklist_id),
+                    str(template.get("version") or "v1"),
+                    now,
+                    now,
+                ),
+            )
+            rows = []
+            for index, item in enumerate(items, start=1):
+                if not isinstance(item, dict):
+                    continue
+                rows.append(
+                    (
+                        str(uuid.uuid4()),
+                        checklist_record_id,
+                        project_id,
+                        checklist_id,
+                        str(template.get("name") or checklist_id),
+                        str(template.get("version") or "v1"),
+                        str(item.get("section") or "General"),
+                        item.get("discipline"),
+                        item.get("sheet_type"),
+                        str(item.get("item_text") or item.get("text") or f"Checklist item {index}"),
+                        str(item.get("applicability") or "applicable"),
+                        "not_started",
+                        _json([]),
+                        "",
+                        item.get("source_template_reference") or template.get("source_template_reference"),
+                        now,
+                        now,
+                    )
+                )
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO project_checklist_items (
+                        id, project_checklist_id, project_id, checklist_id, checklist_name, version,
+                        section, discipline, sheet_type, item_text, applicability, status,
+                        mapped_finding_ids_json, reviewer_notes, source_template_reference,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            self._insert_finding_event(
+                conn,
+                project_id=project_id,
+                finding_id=None,
+                stable_id=None,
+                action="checklist_selected",
+                changes={"checklist_id": checklist_id, "item_count": len(rows)},
+                created_at=now,
+            )
+        return self.get_project_checklist(project_id)
+
+    def get_project_checklist(self, project_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            checklist_row = conn.execute(
+                """
+                SELECT * FROM project_checklists
+                WHERE project_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (project_id,),
+            ).fetchone()
+            if checklist_row is None:
+                return None
+            rows = conn.execute(
+                """
+                SELECT * FROM project_checklist_items
+                WHERE project_checklist_id = ?
+                ORDER BY section ASC, id ASC
+                """,
+                (checklist_row["id"],),
+            ).fetchall()
+        checklist = self._project_checklist_from_row(checklist_row)
+        checklist["items"] = [self._project_checklist_item_from_row(row) for row in rows]
+        checklist["progress"] = checklist_progress_from_items(checklist["items"])
+        return checklist
+
+    def update_project_checklist_item(self, project_id: str, item_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"status", "applicability", "reviewer_notes", "mapped_finding_ids"}
+        updates = {key: fields[key] for key in allowed if key in fields}
+        if "mapped_finding_ids" in updates:
+            updates["mapped_finding_ids_json"] = _json(updates.pop("mapped_finding_ids") or [])
+        if not updates:
+            checklist = self.get_project_checklist(project_id)
+            if checklist is None:
+                raise KeyError(item_id)
+            for item in checklist["items"]:
+                if item["id"] == item_id:
+                    return item
+            raise KeyError(item_id)
+
+        updates["updated_at"] = utc_now_iso()
+        with self.connect() as conn:
+            before_row = conn.execute(
+                "SELECT * FROM project_checklist_items WHERE id = ? AND project_id = ?",
+                (item_id, project_id),
+            ).fetchone()
+            if before_row is None:
+                raise KeyError(item_id)
+            before = self._project_checklist_item_from_row(before_row)
+            assignments = ", ".join(f"{key} = ?" for key in updates)
+            conn.execute(
+                f"UPDATE project_checklist_items SET {assignments} WHERE id = ? AND project_id = ?",
+                list(updates.values()) + [item_id, project_id],
+            )
+            conn.execute(
+                "UPDATE project_checklists SET updated_at = ? WHERE id = ?",
+                (updates["updated_at"], before["project_checklist_id"]),
+            )
+            self._insert_finding_event(
+                conn,
+                project_id=project_id,
+                finding_id=None,
+                stable_id=None,
+                action="checklist_item_updated",
+                changes={
+                    key: {"from": before.get(key), "to": fields.get(key)}
+                    for key in ["status", "applicability", "reviewer_notes", "mapped_finding_ids"]
+                    if key in fields and before.get(key) != fields.get(key)
+                },
+                created_at=updates["updated_at"],
+            )
+        checklist = self.get_project_checklist(project_id)
+        if checklist is None:
+            raise KeyError(item_id)
+        for item in checklist["items"]:
+            if item["id"] == item_id:
+                return item
+        raise KeyError(item_id)
+
+    def project_checklist_progress(self, project_id: str) -> dict[str, Any] | None:
+        checklist = self.get_project_checklist(project_id)
+        if checklist is None:
+            return None
+        return checklist.get("progress")
+
     def _insert_finding_event(
         self,
         conn: sqlite3.Connection,
@@ -1419,12 +1672,21 @@ class Database:
             "include_rejected_examples",
             "include_accepted_examples",
             "include_edited_examples",
+            "include_current_project_examples",
             "advanced_feature_enabled",
         ]:
             item[key] = bool(item.get(key))
         item["max_examples_per_prompt"] = int(item.get("max_examples_per_prompt") or 8)
         item["max_avoid_examples_per_prompt"] = int(item.get("max_avoid_examples_per_prompt") or 5)
         item["min_usefulness_score"] = float(item.get("min_usefulness_score") or 0)
+        return item
+
+    def _project_checklist_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    def _project_checklist_item_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["mapped_finding_ids"] = _loads(item.pop("mapped_finding_ids_json", None), [])
         return item
 
     def _sheet_id_for_page(self, conn: sqlite3.Connection, project_id: str, page_number: Any) -> str | None:
@@ -1531,3 +1793,21 @@ def _join_unique_text(first: Any, second: Any) -> str:
     if left in right:
         return right
     return f"{left} | {right}"
+
+
+def checklist_progress_from_items(items: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(items)
+    by_status: dict[str, int] = {}
+    for item in items:
+        status = str(item.get("status") or "not_started")
+        by_status[status] = by_status.get(status, 0) + 1
+    completed = sum(by_status.get(status, 0) for status in ["checked", "issue_found", "not_applicable"])
+    linked_count = sum(1 for item in items if item.get("mapped_finding_ids"))
+    return {
+        "total_items": total,
+        "completed_items": completed,
+        "issue_items": int(by_status.get("issue_found", 0)),
+        "linked_items": linked_count,
+        "percent_complete": round((completed / total) * 100, 1) if total else 0.0,
+        "by_status": by_status,
+    }

@@ -13,6 +13,7 @@ from backend.app.database import Database
 from backend.app.services.ai_review import AIReviewService
 from backend.app.services.exports import ExportService
 from backend.app.services.pdf_processor import PDFProcessor
+from scripts.validation_reports import write_validation_report
 
 
 def create_smoke_pdf(path: Path) -> None:
@@ -65,6 +66,10 @@ def main() -> None:
 
     sample_ai_response = json.dumps(
         {
+            "reviewed_pages": [
+                {"page_number": 1, "review_status": "complete", "issue_count": 1},
+                {"page_number": 2, "review_status": "complete", "issue_count": 1},
+            ],
             "updates": [
                 {
                     "pageNumber": "Page 1",
@@ -114,6 +119,37 @@ def main() -> None:
 
     export = ExportService(db, settings.data_dir).export_project(project["id"], statuses=["accepted", "needs_review"])
     export_record = export["export"]
+    report = write_validation_report(
+        data_dir=settings.data_dir,
+        report_name="autoqc_smoke_ai_workflow",
+        status="passed",
+        summary="Synthetic PDF upload, extraction, manual AI preview/import, reviewer edit, and draft export passed.",
+        checks=[
+            {"name": "upload_and_extraction", "passed": len(processed["sheets"]) == 2, "detail": f"{len(processed['sheets'])} sheets extracted"},
+            {"name": "no_deterministic_findings_created", "passed": processed["findings"] == [], "detail": "Upload/extraction produced no user-facing rule findings"},
+            {"name": "manual_prompt_generated", "passed": bool(prompt["prompt_version"]), "detail": prompt["prompt_version"]},
+            {"name": "preview_valid_updates", "passed": preview["valid_recoverable_updates"] == 2, "detail": f"batch {preview['batch_id']}"},
+            {"name": "coverage_complete", "passed": preview["review_coverage_status"] == "complete", "detail": f"{preview['review_coverage_percent']}%"},
+            {"name": "import_created_findings", "passed": imported["ai_updates_imported"] == 2, "detail": "2 AI updates imported"},
+            {"name": "draft_export_created", "passed": export["findings_exported"] == 2, "detail": export["validation"]["status"]},
+        ],
+        metrics={
+            "sheets_processed": len(processed["sheets"]),
+            "valid_preview_updates": preview["valid_recoverable_updates"],
+            "findings_imported": imported["ai_updates_imported"],
+            "findings_exported": export["findings_exported"],
+            "export_validation": export["validation"]["status"],
+        },
+        artifacts={
+            "marked_pdf": export_record["marked_pdf_path"],
+            "qa_report": export_record["qa_report_path"],
+            "summary": export_record.get("summary_path"),
+        },
+        limitations=[
+            "Synthetic smoke fixture checks workflow mechanics, not engineering correctness.",
+            "AI response is representative fixture JSON, not a live external AI review.",
+        ],
+    )
     print("AutoQC AI workflow smoke succeeded")
     print(f"Project: {project['id']}")
     print(f"Sheets processed: {len(processed['sheets'])}")
@@ -122,6 +158,7 @@ def main() -> None:
     print(f"Findings exported: {export['findings_exported']}")
     print(f"Marked PDF: {export_record['marked_pdf_path']}")
     print(f"QA report: {export_record['qa_report_path']}")
+    print(f"Validation report: {report['markdown']}")
 
 
 if __name__ == "__main__":

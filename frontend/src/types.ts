@@ -44,6 +44,7 @@ export interface Project {
   finding_status_counts?: Record<string, number>;
   finding_severity_counts?: Record<string, number>;
   finding_category_counts?: Record<string, number>;
+  review_coverage?: ReviewCoverageSummary | null;
 }
 
 export interface Sheet {
@@ -182,12 +183,18 @@ export interface AISettingsRequest {
 
 export interface AIReviewResponse {
   project: Project;
+  direct_review_mode?: "text_context_only" | string;
+  direct_review_sheet_limit_applied?: boolean;
+  direct_review_sent_sheet_count?: number;
+  direct_review_total_sheet_count?: number;
+  warnings?: string[];
   ai_findings_created: number;
   ai_updates_imported?: number;
   raw_ai_count: number;
   imported_stable_ids?: string[];
   imported_finding_ids?: string[];
   batch?: AIImportBatch;
+  quality_report?: ImportQualityReport;
   findings: Finding[];
 }
 
@@ -200,6 +207,44 @@ export interface ManualAIPromptResponse {
   payload_sheet_count: number;
   instructions: string;
   prompt_metadata?: Record<string, unknown>;
+  review_plan?: ManualReviewPlan | null;
+}
+
+export type ManualReviewScope = "package" | "batch" | "sheet";
+
+export interface ManualReviewBatch {
+  id: string;
+  label: string;
+  page_numbers: number[];
+  batch_index: number;
+  batch_count: number;
+  status: "unreviewed" | "partial" | "reviewed" | string;
+  reviewed_pages?: number[];
+}
+
+export interface ManualReviewDeepDiveCandidate {
+  sheet_id?: string | null;
+  page_number: number;
+  drawing_number?: string | null;
+  sheet_title?: string | null;
+  sheet_type?: string | null;
+  label: string;
+  reasons: string[];
+  score: number;
+  status: "unreviewed" | "reviewed" | string;
+}
+
+export interface ManualReviewPlan {
+  project_id: string;
+  sheet_count: number;
+  batch_size: number;
+  batches: ManualReviewBatch[];
+  deep_dive_candidates: ManualReviewDeepDiveCandidate[];
+  reviewed_pages: number[];
+  unreviewed_pages: number[];
+  review_coverage?: ReviewCoverageSummary;
+  review_coverage_status?: "complete" | "incomplete" | "not_confirmed" | string;
+  review_coverage_percent?: number;
 }
 
 export interface AIPreviewUpdate {
@@ -236,14 +281,67 @@ export interface AIPreviewResponse {
   schema_version?: string | null;
   parser_mode?: string | null;
   response_shape?: string | null;
+  review_scope?: ManualReviewScope | string | null;
+  review_strategy?: string | null;
+  scope_pages?: number[];
+  scope_label?: string | null;
+  expected_review_pages?: number[];
+  reviewed_pages?: Array<{ page_number: number; review_status: string; issue_count: number; notes?: string | null }>;
+  reviewed_page_numbers?: number[];
+  reviewed_pages_confirmed?: number[];
+  missing_review_pages?: number[];
+  incomplete_review_pages?: number[];
+  not_readable_pages?: number[];
+  review_coverage_status?: "complete" | "incomplete" | "not_confirmed" | string;
+  review_coverage_percent?: number;
+  review_coverage?: ReviewCoverageSummary;
+  pages_without_review_confirmation?: number[];
+  scoped_review_complete?: boolean;
   total_candidate_updates: number;
   valid_recoverable_updates: number;
   skipped_updates: number;
   duplicate_updates?: number;
   parser_repairs_applied: string[];
   warnings: string[];
+  quality_report?: ImportQualityReport;
   updates: AIPreviewUpdate[];
   batch?: AIImportBatch;
+}
+
+export interface ImportQualityReport {
+  total_updates_parsed: number;
+  total_importable_updates: number;
+  imported_findings: number;
+  skipped_updates: number;
+  duplicate_count: number;
+  missing_page_number_count: number;
+  missing_target_text_count: number;
+  exact_placement_count: number;
+  fuzzy_placement_count: number;
+  page_level_fallback_count: number;
+  manual_placement_needed_count: number;
+  low_confidence_count: number;
+  page_count?: number;
+  expected_review_pages?: number[];
+  reviewed_pages_confirmed?: number[];
+  missing_review_pages?: number[];
+  incomplete_review_pages?: number[];
+  not_readable_pages?: number[];
+  review_coverage_status?: "complete" | "incomplete" | "not_confirmed" | string;
+  review_coverage_percent?: number;
+  pages_with_returned_updates?: number[];
+  pages_with_importable_updates?: number[];
+  pages_with_imported_updates?: number[];
+  pages_with_updates?: number[];
+  pages_reviewed?: number[];
+  pages_without_review_confirmation?: number[];
+  scoped_review_complete?: boolean;
+  pages_without_returned_updates?: number[];
+  pages_with_returned_updates_count?: number;
+  pages_with_imported_updates_count?: number;
+  pages_without_returned_updates_count?: number;
+  warnings?: string[];
+  errors?: string[];
 }
 
 export interface AIImportBatch {
@@ -252,6 +350,9 @@ export interface AIImportBatch {
   source_type?: string | null;
   prompt_version?: string | null;
   prompt_id?: string | null;
+  raw_response_stored?: boolean;
+  raw_response_length?: number;
+  raw_response_sha256?: string | null;
   parser_warnings?: string[];
   parser_repairs?: string[];
   candidate_count: number;
@@ -294,10 +395,17 @@ export interface ExportResponse {
   findings_exported?: number;
   placement_summary?: PlacementSummary;
   validation?: ExportValidationResult;
+  export_mode?: "draft" | "final" | string;
+  review_coverage?: ReviewCoverageSummary;
+  signoff?: ReviewerSignoff | null;
 }
 
 export interface ExportRequest {
+  export_mode?: "draft" | "final";
   statuses: FindingStatus[];
+  reviewer_name?: string;
+  final_export_confirmed?: boolean;
+  acknowledge_validation_warnings?: boolean;
 }
 
 export interface ExportValidationResult {
@@ -317,7 +425,70 @@ export interface PromptTemplate {
   name: string;
   version: string;
   description?: string;
+  category?: string;
+  intended_use?: string;
+  review_depth?: string;
+  when_to_use?: string;
+  when_not_to_use?: string;
   review_priorities?: string[];
+}
+
+export interface ChecklistTemplate {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  item_count?: number;
+}
+
+export type ChecklistStatus = "not_started" | "checked" | "issue_found" | "not_applicable" | "needs_human_review";
+
+export interface ChecklistItem {
+  id: string;
+  project_checklist_id: string;
+  project_id: string;
+  checklist_id: string;
+  checklist_name: string;
+  version: string;
+  section: string;
+  discipline?: string | null;
+  sheet_type?: string | null;
+  item_text: string;
+  applicability: string;
+  status: ChecklistStatus;
+  mapped_finding_ids: string[];
+  reviewer_notes?: string | null;
+  source_template_reference?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChecklistItemUpdate {
+  status?: ChecklistStatus;
+  applicability?: string;
+  mapped_finding_ids?: string[];
+  reviewer_notes?: string;
+}
+
+export interface ChecklistProgress {
+  total_items: number;
+  completed_items: number;
+  issue_items: number;
+  linked_items: number;
+  percent_complete: number;
+  by_status: Record<string, number>;
+}
+
+export interface ProjectChecklist {
+  id?: string;
+  project_id: string;
+  checklist_id?: string;
+  checklist_name?: string;
+  version?: string;
+  items: ChecklistItem[];
+  progress?: ChecklistProgress | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface ReadinessCheck {
@@ -328,6 +499,8 @@ export interface ReadinessCheck {
 
 export interface ReadinessResponse {
   status: "passed" | "warning" | "failed" | string;
+  mode?: string;
+  summary?: string;
   actor?: string;
   checks: ReadinessCheck[];
   instructions: Record<string, string>;
@@ -346,6 +519,41 @@ export interface ProjectPackageImportResponse {
   original_project_id: string;
   restored_project_id: string;
   remapped_ids: boolean;
+  preview?: ProjectPackageImportPreview;
+}
+
+export interface ProjectPackageImportPreview {
+  valid: boolean;
+  schema_version?: string | null;
+  project_name?: string | null;
+  original_project_id?: string | null;
+  restored_project_id?: string | null;
+  remapped_ids?: boolean;
+  sheet_count: number;
+  finding_count: number;
+  import_batches_count: number;
+  export_record_count?: number;
+  export_artifact_count: number;
+  source_pdf_included: boolean;
+  source_pdf_valid: boolean;
+  warnings: string[];
+  errors: string[];
+}
+
+export interface ReviewCoverageSummary {
+  expected_review_pages: number[];
+  reviewed_pages_confirmed: number[];
+  missing_review_pages: number[];
+  incomplete_review_pages: number[];
+  not_readable_pages: number[];
+  review_coverage_status: "complete" | "incomplete" | "not_confirmed" | string;
+  review_coverage_percent: number;
+}
+
+export interface ReviewerSignoff {
+  reviewer_name: string;
+  timestamp: string;
+  final_export_confirmed: boolean;
 }
 
 export interface BatchRollbackPreview {
@@ -374,6 +582,7 @@ export interface MarkupMemorySettings {
   include_rejected_examples: boolean;
   include_accepted_examples: boolean;
   include_edited_examples: boolean;
+  include_current_project_examples: boolean;
   min_usefulness_score: number;
   advanced_feature_enabled: boolean;
   created_at?: string;
