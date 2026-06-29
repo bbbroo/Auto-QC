@@ -6,6 +6,7 @@ from pathlib import Path
 def test_frontend_main_workflow_smoke_contract() -> None:
     app_source = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
     api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")
+    main_source = Path("frontend/src/main.tsx").read_text(encoding="utf-8")
     styles_source = Path("frontend/src/styles.css").read_text(encoding="utf-8")
 
     workflow_text = [
@@ -81,6 +82,21 @@ def test_frontend_main_workflow_smoke_contract() -> None:
         "Memory is local",
         "Include current project examples",
         "Open experimental power-user settings",
+        "Show generated validation projects",
+        "Tag old validation runs",
+        "Clean validation runs",
+        "Second-pass audit recommended",
+        "Copy missed-issue audit prompt",
+        "Use as next prompt",
+        "Second-pass audit import armed",
+        "Upload cautions",
+        "AI response preflight",
+        "Import blocked by coverage",
+        "Final package controls are strict.",
+        "Draft package for working review.",
+        "Generated report shortcuts",
+        "Replace the placeholder reviewer name",
+        "Text-only AI Lab",
     ]
     for text in workflow_text:
         assert text in app_source
@@ -94,6 +110,13 @@ def test_frontend_main_workflow_smoke_contract() -> None:
     assert "imageElement.naturalHeight" in app_source
     assert "imagePixelRectToOverlayPercent" in app_source
     assert 'data-coordinate-space="image_pixel"' in app_source
+    assert "window.fetch" not in main_source
+    assert "deleteValidationProjects" in api_source
+    assert "tagGeneratedValidationProjects" in api_source
+    assert "review_modality" in api_source
+    assert "audit_of_batch_id" in api_source
+    assert "withRecoveryHint" in api_source
+    assert "missed_issue_audit" in app_source
 
     resilient_ui_hooks = [
         "global-status-banner",
@@ -133,6 +156,9 @@ def test_frontend_main_workflow_smoke_contract() -> None:
         "recovery-center",
         "operation-progress",
         "why-blocked-details",
+        "validation-project-controls",
+        "experimental-ai-action",
+        "missed-issue-audit-panel",
         "success-helper",
         "warning-helper",
     ]
@@ -152,9 +178,17 @@ def test_frontend_main_workflow_smoke_contract() -> None:
 
 def test_launcher_opens_detected_frontend_port() -> None:
     launcher = Path("Run AutoQC.bat").read_text(encoding="utf-8")
+    dev_script = Path("scripts/dev.ps1").read_text(encoding="utf-8")
+    package_json = Path("frontend/package.json").read_text(encoding="utf-8")
+    vite_config = Path("frontend/vite.config.ts").read_text(encoding="utf-8")
 
     assert "FRONTEND_BASE_PORT=5173" in launcher
     assert "FRONTEND_MAX_PORT=5199" in launcher
     assert 'set "FRONTEND_URL=http://127.0.0.1:%FRONTEND_PORT%"' in launcher
     assert "npm run dev -- --host 127.0.0.1 --port %FRONTEND_PORT% --strictPort" in launcher
     assert 'start "" "%FRONTEND_URL%"' in launcher
+    assert "$FrontendBasePort = 5173" in dev_script
+    assert "$FrontendMaxPort = 5199" in dev_script
+    assert "--port $FrontendPort --strictPort" in dev_script
+    assert '"dev": "vite"' in package_json
+    assert 'host: "127.0.0.1"' in vite_config

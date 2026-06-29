@@ -40,6 +40,7 @@ class Database:
                     source_pdf_path TEXT,
                     status TEXT NOT NULL,
                     summary TEXT,
+                    project_type TEXT NOT NULL DEFAULT 'review',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -253,6 +254,7 @@ class Database:
                 );
                 """
             )
+            self._ensure_column(conn, "projects", "project_type", "TEXT NOT NULL DEFAULT 'review'")
             self._ensure_column(conn, "exports", "html_path", "TEXT")
             self._ensure_column(conn, "exports", "qa_report_path", "TEXT")
             self._ensure_column(conn, "exports", "status_filter_json", "TEXT")
@@ -331,16 +333,22 @@ class Database:
             (now, now),
         )
 
-    def create_project(self, name: str, source_pdf_path: str | None = None) -> dict[str, Any]:
+    def create_project(
+        self,
+        name: str,
+        source_pdf_path: str | None = None,
+        project_type: str = "review",
+    ) -> dict[str, Any]:
         project_id = str(uuid.uuid4())
         now = utc_now_iso()
+        resolved_type = normalize_project_type(project_type)
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO projects (id, name, source_pdf_path, status, summary, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO projects (id, name, source_pdf_path, status, summary, project_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (project_id, name, source_pdf_path, "new", None, now, now),
+                (project_id, name, source_pdf_path, "new", None, resolved_type, now, now),
             )
         return self.get_project(project_id)
 
@@ -369,7 +377,45 @@ class Database:
             raise KeyError(project_id)
         return dict(row)
 
-    def list_projects(self) -> list[dict[str, Any]]:
+    def list_projects(self, include_validation: bool = False) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            where = "" if include_validation else "WHERE COALESCE(p.project_type, 'review') != 'validation'"
+            rows = conn.execute(
+                f"""
+                SELECT p.*,
+                       (SELECT COUNT(*) FROM sheets WHERE project_id = p.id) AS sheet_count,
+                       (SELECT COUNT(*) FROM findings WHERE project_id = p.id AND source = 'ai') AS finding_count
+                FROM projects p
+                {where}
+                ORDER BY p.updated_at DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_projects_by_type(self) -> dict[str, int]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(project_type, 'review') AS project_type, COUNT(*) AS count
+                FROM projects
+                GROUP BY COALESCE(project_type, 'review')
+                """
+            ).fetchall()
+        return {str(row["project_type"]): int(row["count"]) for row in rows}
+
+    def list_validation_project_ids(self) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM projects
+                WHERE COALESCE(project_type, 'review') = 'validation'
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def list_generated_validation_candidates(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -377,10 +423,39 @@ class Database:
                        (SELECT COUNT(*) FROM sheets WHERE project_id = p.id) AS sheet_count,
                        (SELECT COUNT(*) FROM findings WHERE project_id = p.id AND source = 'ai') AS finding_count
                 FROM projects p
+                WHERE COALESCE(p.project_type, 'review') != 'validation'
                 ORDER BY p.updated_at DESC
                 """
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in rows if looks_like_generated_validation_project(row["name"])]
+
+    def tag_generated_validation_projects(self, *, dry_run: bool = True) -> dict[str, Any]:
+        candidates = self.list_generated_validation_candidates()
+        matched_ids = [str(project["id"]) for project in candidates]
+        if not dry_run and matched_ids:
+            now = utc_now_iso()
+            with self.connect() as conn:
+                conn.executemany(
+                    "UPDATE projects SET project_type = 'validation', updated_at = ? WHERE id = ?",
+                    [(now, project_id) for project_id in matched_ids],
+                )
+        return {
+            "dry_run": bool(dry_run),
+            "matched_count": len(matched_ids),
+            "tagged_count": 0 if dry_run else len(matched_ids),
+            "matched_project_ids": matched_ids,
+            "matched_projects": [
+                {
+                    "id": str(project["id"]),
+                    "name": str(project.get("name") or ""),
+                    "updated_at": project.get("updated_at"),
+                    "sheet_count": int(project.get("sheet_count") or 0),
+                    "finding_count": int(project.get("finding_count") or 0),
+                }
+                for project in candidates
+            ],
+            "remaining_by_type": self.count_projects_by_type() if not dry_run else None,
+        }
 
     def delete_project(self, project_id: str) -> None:
         with self.connect() as conn:
@@ -1811,3 +1886,22 @@ def checklist_progress_from_items(items: list[dict[str, Any]]) -> dict[str, Any]
         "percent_complete": round((completed / total) * 100, 1) if total else 0.0,
         "by_status": by_status,
     }
+
+
+def normalize_project_type(value: Any) -> str:
+    normalized = str(value or "review").strip().lower().replace("-", "_").replace(" ", "_")
+    return "validation" if normalized in {"validation", "generated_validation", "test", "generated"} else "review"
+
+
+def looks_like_generated_validation_project(name: Any) -> bool:
+    normalized = " ".join(str(name or "").strip().lower().split())
+    if not normalized:
+        return False
+    return any(
+        normalized.startswith(prefix)
+        for prefix in (
+            "smoke ai workflow",
+            "large wide stress fixture",
+            "real pdf regression",
+        )
+    )

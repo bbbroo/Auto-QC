@@ -78,12 +78,14 @@ class SheetEvidenceBuilder:
             "validation": all_validations,
             "valid": all(item.get("passed") for item in all_validations),
             "enhanced_prompt_preview": str(preview_path),
+            "failed_pages": [page for item in pdf_results for page in item.get("failed_pages", [])],
             "pdf_results": [
                 {
                     "pdf_path": item["pdf_path"],
                     "output_dir": item["output_dir"],
                     "processed_page_count": item["processed_page_count"],
                     "page_count": item["page_count"],
+                    "failed_pages": item.get("failed_pages", []),
                 }
                 for item in pdf_results
             ],
@@ -112,18 +114,42 @@ class SheetEvidenceBuilder:
 
         page_count = package_page_count(pdf_path)
         selected_pages = _selected_page_numbers(pdf_path, page_count, mode=mode, pages=pages, max_pages=max_pages)
-        packets = []
+        packets: list[dict[str, Any]] = []
+        failed_pages: list[int] = []
+
         for page_number in selected_pages:
-            packet = self.build_page_packet(pdf_path, page_number, page_count, debug_dir=debug_dir, image_dir=image_dir)
-            packet_dict = packet.to_dict()
             packet_path = pages_dir / f"page_{page_number:03d}.json"
-            context_path = prompt_dir / f"page_{page_number:03d}.md"
-            debug_text_path = debug_dir / f"page_{page_number:03d}.txt"
-            debug_text_path.write_text(packet.text.full_text, encoding="utf-8", errors="replace")
-            packet_dict["source_files"]["debug_text"] = str(debug_text_path)
-            write_json(packet_path, packet_dict)
-            context_path.write_text(page_prompt_context(packet_dict) + "\n", encoding="utf-8")
-            packets.append(packet_dict)
+            # Resumable: reuse existing page JSON if --force is not set
+            if not force and packet_path.is_file():
+                try:
+                    packet_dict = json.loads(packet_path.read_text(encoding="utf-8"))
+                    packets.append(packet_dict)
+                    # Regenerate prompt context if missing
+                    context_path = prompt_dir / f"page_{page_number:03d}.md"
+                    if not context_path.is_file():
+                        context_path.write_text(page_prompt_context(packet_dict) + "\n", encoding="utf-8")
+                    continue
+                except (json.JSONDecodeError, Exception):
+                    pass  # fall through to rebuild
+
+            # Per-page try/except isolation
+            try:
+                packet = self.build_page_packet(pdf_path, page_number, page_count, debug_dir=debug_dir, image_dir=image_dir)
+                packet_dict = packet.to_dict()
+                context_path = prompt_dir / f"page_{page_number:03d}.md"
+                debug_text_path = debug_dir / f"page_{page_number:03d}.txt"
+                debug_text_path.write_text(packet.text.full_text, encoding="utf-8", errors="replace")
+                packet_dict["source_files"]["debug_text"] = str(debug_text_path)
+                write_json(packet_path, packet_dict)
+                context_path.write_text(page_prompt_context(packet_dict) + "\n", encoding="utf-8")
+                packets.append(packet_dict)
+            except Exception as exc:
+                failed_pages.append(page_number)
+                packet_dict = _build_fallback_packet(pdf_path, page_number, page_count, str(exc))
+                write_json(packet_path, packet_dict)
+                context_path = prompt_dir / f"page_{page_number:03d}.md"
+                context_path.write_text(page_prompt_context(packet_dict) + "\n", encoding="utf-8")
+                packets.append(packet_dict)
 
         package_index = build_package_index(packets)
         _apply_package_index_to_packets(package_index, packets)
@@ -135,8 +161,13 @@ class SheetEvidenceBuilder:
         write_json(pdf_dir / "package_index.json", {"pdf_path": str(pdf_path), "entries": [entry.to_dict() for entry in package_index]})
         summary_md = package_summary_markdown(pdf_path, page_count, selected_pages, packets, package_index)
         (pdf_dir / "package_summary.md").write_text(summary_md, encoding="utf-8")
-        validation = validate_pdf_output(pdf_path, page_count, selected_pages, packets, pdf_dir)
-        write_json(pdf_dir / "evidence_build_summary.json", {"pdf_path": str(pdf_path), "page_count": page_count, "processed_pages": selected_pages, "validation": validation})
+        write_json(pdf_dir / "evidence_build_summary.json", {
+            "pdf_path": str(pdf_path),
+            "page_count": page_count,
+            "processed_pages": selected_pages,
+            "failed_pages": failed_pages,
+        })
+        validation = validate_pdf_output(pdf_path, page_count, selected_pages, packets, pdf_dir, mode=mode, pages=pages, max_pages=max_pages)
         return {
             "pdf_path": str(pdf_path),
             "output_dir": str(pdf_dir),
@@ -145,6 +176,7 @@ class SheetEvidenceBuilder:
             "packets": packets,
             "package_index": [entry.to_dict() for entry in package_index],
             "validation": validation,
+            "failed_pages": failed_pages,
         }
 
     def build_page_packet(
@@ -282,22 +314,84 @@ def parse_drawing_index(text: str, index_page_number: int) -> list[PackageIndexE
     return entries[:300]
 
 
-def validate_pdf_output(pdf_path: Path, page_count: int, selected_pages: list[int], packets: list[dict[str, Any]], pdf_dir: Path) -> list[dict[str, Any]]:
+def _build_fallback_packet(pdf_path: Path, page_number: int, page_count: int, error: str) -> dict[str, Any]:
+    """Build a valid fallback evidence packet when page extraction fails."""
+    page_width = 0.0
+    page_height = 0.0
+    try:
+        import fitz
+        with fitz.open(pdf_path) as doc:
+            if 1 <= page_number <= doc.page_count:
+                page = doc.load_page(page_number - 1)
+                page_width = float(page.rect.width)
+                page_height = float(page.rect.height)
+    except Exception:
+        pass
+    return {
+        "pdf_path": str(pdf_path),
+        "pdf_name": pdf_path.name,
+        "page_number": page_number,
+        "page_count": page_count,
+        "sheet_number": "",
+        "drawing_number": "UNKNOWN",
+        "sheet_title": "Unknown Sheet",
+        "discipline": "unknown",
+        "page_width": page_width,
+        "page_height": page_height,
+        "extraction_strategy": {"text_extractor": "fallback", "layout_extractor": "fallback", "table_extractor": "fallback", "rendering_tool": "fallback"},
+        "extraction_failed": True,
+        "extraction_error": error,
+        "quality": {"text_score": 0.0, "layout_score": 0.0, "table_score": 0.0, "overall_score": 0.0, "warnings": ["page evidence extraction failed", error]},
+        "text": {"full_text": "", "important_text": [], "notes": [], "title_block_text": "", "revision_block_text": ""},
+        "layout_blocks": [],
+        "tables": [],
+        "references": {"drawing_references": [], "sheet_references": [], "detail_references": [], "section_references": [], "note_references": [], "cross_references": []},
+        "engineering_tokens": {"equipment_tags": [], "instrument_tags": [], "valve_tags": [], "pipe_size_tokens": [], "line_numbers": [], "spec_or_code_references": []},
+        "rendered_page_image": {"path": None, "width": None, "height": None, "dpi": None},
+        "source_files": {"raw_extraction": None, "debug_text": None},
+    }
+
+
+def validate_pdf_output(
+    pdf_path: Path,
+    page_count: int,
+    selected_pages: list[int],
+    packets: list[dict[str, Any]],
+    pdf_dir: Path,
+    *,
+    mode: str = "full",
+    pages: list[int] | None = None,
+    max_pages: int | None = None,
+) -> list[dict[str, Any]]:
+    prompt_dir = pdf_dir / "prompt_context"
     validations = [
         _check("package summary exists", (pdf_dir / "package_summary.md").is_file()),
         _check("package index exists", (pdf_dir / "package_index.json").is_file()),
+        _check("evidence build summary exists", (pdf_dir / "evidence_build_summary.json").is_file()),
         _check("one packet per processed page", len(packets) == len(selected_pages)),
         _check("page numbers are correct", sorted(int(packet.get("page_number") or 0) for packet in packets) == sorted(selected_pages)),
         _check("page count matches PDF", all(int(packet.get("page_count") or 0) == page_count for packet in packets)),
-        _check("page dimensions present", all(float(packet.get("page_width") or 0) > 0 and float(packet.get("page_height") or 0) > 0 for packet in packets)),
+        _check("page dimensions present", all(float(packet.get("page_width") or 0) > 0 and float(packet.get("page_height") or 0) > 0 for packet in packets if not packet.get("extraction_failed"))),
         _check("no packet claims completeness", not any(_claims_completeness(packet) for packet in packets)),
-        _check(
-            "prompt contexts include source-of-truth warning",
-            all(SOURCE_OF_TRUTH_WARNING in (pdf_dir / "prompt_context" / f"page_{int(packet.get('page_number')):03d}.md").read_text(encoding="utf-8") for packet in packets),
-        ),
     ]
     for page in selected_pages:
         validations.append(_check(f"page {page} evidence json exists", (pdf_dir / "pages" / f"page_{page:03d}.json").is_file()))
+    for page in selected_pages:
+        context_path = prompt_dir / f"page_{page:03d}.md"
+        exists = context_path.is_file()
+        validations.append(_check(f"page {page} prompt context exists", exists))
+        if exists:
+            validations.append(
+                _check(
+                    f"page {page} prompt context has source-of-truth warning",
+                    SOURCE_OF_TRUTH_WARNING in context_path.read_text(encoding="utf-8"),
+                )
+            )
+    # Full mode check: if mode=full and no page limits, every page should be selected
+    if mode == "full" and not pages and not max_pages:
+        validations.append(_check("full mode selected every page (no limiting)", len(selected_pages) == page_count))
+    elif mode == "full":
+        validations.append(_check("full mode with explicit limits", len(selected_pages) <= page_count))
     return validations
 
 

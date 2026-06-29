@@ -26,11 +26,19 @@ from backend.app.services.review_coverage import (
 from backend.app.services.storage import require_project_source_pdf_path
 from backend.sheet_evidence.builder import SheetEvidenceBuilder
 from backend.sheet_evidence.prompt_context import package_prompt_context
-from backend.sheet_evidence.recommendation import analyze_benchmark_run, find_latest_benchmark_run
 
 
 CHAT_PROMPT_VERSION = "autoqc-chat-prompt-v4-exhaustive-manual"
 DEFAULT_IMPORT_SOURCE = "manual_chat_prompt"
+MISSED_ISSUE_AUDIT_SOURCE = "missed_issue_audit"
+MANUAL_PDF_ATTACHED_MODALITY = "manual_pdf_attached_external"
+TEXT_CONTEXT_ONLY_MODALITY = "text_context_only"
+PDF_IMAGE_DIRECT_MODALITY = "pdf_image_direct"
+ALLOWED_REVIEW_MODALITIES = {
+    MANUAL_PDF_ATTACHED_MODALITY,
+    TEXT_CONTEXT_ONLY_MODALITY,
+    PDF_IMAGE_DIRECT_MODALITY,
+}
 DEFAULT_MANUAL_BATCH_SIZE = 8
 ALLOWED_MANUAL_BATCH_SIZES = {3, 5, 8, 10}
 TEXT_HEAVY_DEEP_DIVE_CHARS = 2500
@@ -66,6 +74,30 @@ def _mask_api_key(value: str | None) -> str | None:
 
 def utc_now_iso_safe() -> str:
     return utc_now_iso()
+
+
+def normalize_review_modality(source_type: str | None, explicit: str | None = None) -> str:
+    value = (explicit or "").strip().lower()
+    if value in ALLOWED_REVIEW_MODALITIES:
+        return value
+    if (source_type or "").strip().lower() == "direct_ai":
+        return TEXT_CONTEXT_ONLY_MODALITY
+    return MANUAL_PDF_ATTACHED_MODALITY
+
+
+def is_missed_issue_audit_import(source_type: str | None, audit_of_batch_id: str | None = None) -> bool:
+    return (source_type or "").strip().lower() == MISSED_ISSUE_AUDIT_SOURCE or bool((audit_of_batch_id or "").strip())
+
+
+def missed_issue_audit_metadata(audit_of_batch_id: str | None, audit_round: int | None = None) -> dict[str, Any]:
+    batch_id = (audit_of_batch_id or "").strip()
+    if not batch_id:
+        return {}
+    return {
+        "audit_type": "missed_issue_second_pass",
+        "audit_of_batch_id": batch_id,
+        "audit_round": max(1, int(audit_round or 1)),
+    }
 
 
 class AIClient(Protocol):
@@ -228,10 +260,22 @@ class AIReviewService:
             if not scope_pages:
                 scope_pages = [int(sheet.get("page_number") or 0) for sheet in sheets if _positive_int(sheet.get("page_number"))]
             max_pages = int(getattr(self.settings, "sheet_evidence_prompt_max_pages", 80) or 0)
-            if max_pages > 0:
+            original_scope_page_count = len(scope_pages)
+            truncated_page_count = 0
+            warnings: list[str] = []
+            if max_pages > 0 and len(scope_pages) > max_pages:
+                truncated_page_count = len(scope_pages) - max_pages
+                warnings.append(
+                    f"Sheet Evidence prompt context was capped at {max_pages} pages; {truncated_page_count} scoped page evidence packet(s) were omitted. The attached PDF remains the source of truth."
+                )
                 scope_pages = scope_pages[:max_pages]
-            benchmark_root = self.settings.repo_root / ".local" / "autoqc_extraction_benchmark"
-            recommendation = analyze_benchmark_run(find_latest_benchmark_run(benchmark_root), allow_fallback=True)
+            recommendation = {
+                "primary_text_extractor": "pymupdf",
+                "primary_layout_extractor": "pymupdf",
+                "primary_table_extractor": "pymupdf",
+                "pdf_rendering_tool": "pymupdf",
+                "reason": "App prompt generation keeps optional pdfplumber/Camelot extraction disabled for speed.",
+            }
             output_root = self.settings.repo_root / ".local" / "autoqc_sheet_evidence" / "app_prompts"
             builder = SheetEvidenceBuilder(recommendation=recommendation, output_root=output_root)
             result = builder.build_pdfs([source_path], mode="full", pages=scope_pages or None, max_pages=None)
@@ -241,8 +285,11 @@ class AIReviewService:
                 "included": bool(packets),
                 "prompt_section": package_prompt_context(packets),
                 "packet_count": len(packets),
+                "scope_page_count": original_scope_page_count,
+                "truncated_page_count": truncated_page_count,
+                "max_pages": max_pages,
                 "output_dir": result.get("run_dir"),
-                "warnings": [item.get("name") for item in result.get("validation", []) if not item.get("passed")],
+                "warnings": warnings + [item.get("name") for item in result.get("validation", []) if not item.get("passed")],
             }
         except Exception as exc:
             return {
@@ -261,6 +308,9 @@ class AIReviewService:
         source_type: str = DEFAULT_IMPORT_SOURCE,
         prompt_version: str | None = None,
         prompt_id: str | None = None,
+        review_modality: str | None = None,
+        audit_of_batch_id: str | None = None,
+        audit_round: int | None = None,
     ) -> dict[str, Any]:
         self.db.get_project(project_id)
         sheets = self.db.list_sheets(project_id)
@@ -269,14 +319,20 @@ class AIReviewService:
         parser_report = parse_json_object_with_report(response_text)
         ai_response = parser_report["data"]
         prompt_metadata = prompt_metadata_for_import(self.db, project_id, prompt_id)
+        if audit_of_batch_id and source_type == DEFAULT_IMPORT_SOURCE:
+            source_type = MISSED_ISSUE_AUDIT_SOURCE
+        normalized_modality = normalize_review_modality(source_type, review_modality)
+        audit_metadata = missed_issue_audit_metadata(audit_of_batch_id, audit_round)
         parser_metadata = {
             "schema_version": parser_report.get("schema_version"),
             "parser_mode": parser_report.get("parser_mode"),
             "response_shape": parser_report.get("response_shape"),
+            "review_modality": normalized_modality,
             "ai_tool": "manual_chat_prompt",
             "ai_provider": "manual_external",
             "ai_model": None,
             **prompt_metadata,
+            **audit_metadata,
         }
         preview = build_import_preview(
             project_id=project_id,
@@ -291,6 +347,34 @@ class AIReviewService:
             prompt_id=prompt_id,
             parser_metadata=parser_metadata,
         )
+        if is_missed_issue_audit_import(source_type, audit_of_batch_id):
+            preview["missed_issue_audit_prompt"] = None
+            preview["missed_issue_audit"] = {
+                "available": False,
+                "recommended": False,
+                "reason": "This import preview is already linked as a missed-issue audit.",
+                **audit_metadata,
+            }
+        else:
+            missed_issue_prompt = build_missed_issue_audit_prompt(
+                project_id=project_id,
+                sheets=sheets,
+                prior_response=ai_response,
+                prior_preview=preview,
+                raw_response_text=response_text,
+                prompt_metadata=parser_metadata,
+            )
+            preview["missed_issue_audit_prompt"] = missed_issue_prompt
+            preview["missed_issue_audit"] = {
+                "available": True,
+                "recommended": True,
+                "purpose": "Second-pass recall audit for additional visible issues not reported in the first AI response.",
+                "prior_import_batch_id": batch_id,
+                "next_source_type": MISSED_ISSUE_AUDIT_SOURCE,
+                "next_audit_round": 1,
+                "review_modality": MANUAL_PDF_ATTACHED_MODALITY,
+                "yield_metric": "audit_yield_count",
+            }
         batch = self.db.create_ai_import_batch(
             project_id,
             {
@@ -324,8 +408,20 @@ class AIReviewService:
         source_type: str = DEFAULT_IMPORT_SOURCE,
         prompt_version: str | None = None,
         prompt_id: str | None = None,
+        review_modality: str | None = None,
+        audit_of_batch_id: str | None = None,
+        audit_round: int | None = None,
     ) -> dict[str, Any]:
-        preview = self.preview_manual_response(project_id, response_text, source_type, prompt_version, prompt_id)
+        preview = self.preview_manual_response(
+            project_id,
+            response_text,
+            source_type,
+            prompt_version,
+            prompt_id,
+            review_modality=review_modality,
+            audit_of_batch_id=audit_of_batch_id,
+            audit_round=audit_round,
+        )
         return self.import_preview(project_id, preview["batch_id"])
 
     def import_preview(self, project_id: str, preview_id: str) -> dict[str, Any]:
@@ -354,6 +450,8 @@ class AIReviewService:
                 batch_metadata["quality_report"] = quality_report
                 batch_metadata["review_coverage"] = preview.get("review_coverage")
                 batch_metadata["clean_review_pages"] = clean_pages_from_preview(preview)
+                if batch_metadata.get("audit_of_batch_id"):
+                    batch_metadata["audit_yield_count"] = 0
                 batch = self.db.update_ai_import_batch(
                     preview_id,
                     {
@@ -383,6 +481,8 @@ class AIReviewService:
                     "imported_finding_ids": [],
                     "batch": public_ai_import_batch(batch),
                     "quality_report": quality_report,
+                    "missed_issue_audit_prompt": preview.get("missed_issue_audit_prompt"),
+                    "missed_issue_audit": preview.get("missed_issue_audit"),
                     "findings": self.db.list_findings(project_id, sources=["ai"]),
                 }
             raise ValueError("AI import preview contains zero valid updates to import. Run preview again and review the warnings.")
@@ -398,6 +498,8 @@ class AIReviewService:
             batch_metadata["quality_report"] = quality_report
             batch_metadata["review_coverage"] = preview.get("review_coverage")
             batch_metadata["clean_review_pages"] = clean_pages_from_preview(preview)
+            if batch_metadata.get("audit_of_batch_id"):
+                batch_metadata["audit_yield_count"] = len(ai_findings)
             batch = self.db.update_ai_import_batch(
                 preview_id,
                 {
@@ -441,6 +543,8 @@ class AIReviewService:
             "imported_finding_ids": [finding["id"] for finding in stored_imported],
             "batch": public_ai_import_batch(batch),
             "quality_report": quality_report,
+            "missed_issue_audit_prompt": preview.get("missed_issue_audit_prompt"),
+            "missed_issue_audit": preview.get("missed_issue_audit"),
             "findings": self.db.list_findings(project_id, sources=["ai"]),
         }
 
@@ -560,10 +664,11 @@ class AIReviewService:
             "review_scope": "batch" if direct_cap_applied else "package",
             "scope_pages": sent_pages if direct_cap_applied else [],
             "source_of_truth": "extracted_text_context",
+            "review_modality": TEXT_CONTEXT_ONLY_MODALITY,
             "ai_tool": "direct_ai_review",
             "ai_provider": self.settings.ai_provider or "openai",
             "ai_model": self.settings.ai_model or None,
-            "direct_review_mode": "text_context_only",
+            "direct_review_mode": TEXT_CONTEXT_ONLY_MODALITY,
             "direct_review_warning": direct_warnings[0],
             "direct_review_sheet_limit_applied": direct_cap_applied,
             "direct_review_sent_sheet_count": len(payload.get("sheets") or []),
@@ -638,7 +743,8 @@ class AIReviewService:
         stored_imported = _find_by_stable_ids(self.db.list_findings(project_id, sources=["ai"]), ai_findings)
         return {
             "project": self.db.get_project(project_id),
-            "direct_review_mode": "text_context_only",
+            "direct_review_mode": TEXT_CONTEXT_ONLY_MODALITY,
+            "review_modality": TEXT_CONTEXT_ONLY_MODALITY,
             "direct_review_sheet_limit_applied": direct_cap_applied,
             "direct_review_sent_sheet_count": len(payload.get("sheets") or []),
             "direct_review_total_sheet_count": len(sheets),
@@ -650,6 +756,8 @@ class AIReviewService:
             "imported_finding_ids": [finding["id"] for finding in stored_imported],
             "batch": public_ai_import_batch(batch),
             "quality_report": quality_report,
+            "missed_issue_audit_prompt": preview.get("missed_issue_audit_prompt"),
+            "missed_issue_audit": preview.get("missed_issue_audit"),
             "findings": self.db.list_findings(project_id, sources=["ai"]),
         }
 
@@ -881,6 +989,57 @@ def build_ai_payload(
     }
 
 
+def build_missed_issue_audit_prompt(
+    *,
+    project_id: str,
+    sheets: list[dict[str, Any]],
+    prior_response: Any,
+    prior_preview: dict[str, Any],
+    raw_response_text: str,
+    prompt_metadata: dict[str, Any],
+) -> str:
+    scope_pages = [int(page) for page in prompt_metadata.get("scope_pages") or [] if _positive_int(page)]
+    if not scope_pages:
+        scope_pages = [int(sheet.get("page_number") or 0) for sheet in sheets if _positive_int(sheet.get("page_number"))]
+    sheet_index = [
+        {
+            "page_number": sheet.get("page_number"),
+            "drawing_number": sheet.get("drawing_number"),
+            "sheet_title": sheet.get("sheet_title"),
+            "revision": sheet.get("revision"),
+            "sheet_type": sheet.get("sheet_type"),
+        }
+        for sheet in sheets
+        if not scope_pages or int(sheet.get("page_number") or 0) in set(scope_pages)
+    ]
+    prior_json = json.dumps(prior_response, ensure_ascii=False, indent=2)
+    if len(prior_json) > 30000:
+        prior_json = prior_json[:30000].rstrip() + "\n... [prior response clipped for prompt size]"
+    context = {
+        "project_id": project_id,
+        "audit_type": "missed_issue_second_pass",
+        "scope_pages": scope_pages,
+        "prior_import_batch_id": prior_preview.get("batch_id"),
+        "prior_candidate_updates": prior_preview.get("total_candidate_updates"),
+        "prior_importable_updates": prior_preview.get("valid_recoverable_updates"),
+        "sheet_index": sheet_index,
+    }
+    return (
+        "You are acting as the AutoQC missed-issue audit reviewer.\n\n"
+        "This is a mandatory second-pass recall audit for the same attached PDF pages that were already reviewed once.\n"
+        "Assume the first AI review may have missed valid visible drawing updates. Re-review the attached PDF pages from scratch and return only additional issues not already reported in the prior JSON.\n\n"
+        "The attached PDF remains the source of truth. The prior JSON and AutoQC context are only used to avoid duplicates.\n\n"
+        f"Pages to re-review: {', '.join(str(page) for page in scope_pages) if scope_pages else 'entire attached PDF package'}.\n\n"
+        "Rules: do not repeat existing issues; do not paraphrase an existing issue as new; every additional update needs page_number, exact target_text, required_update, rationale, severity, category, and numeric confidence; return only valid JSON.\n\n"
+        "Return schema_version \"autoqc-ai-updates-v1\". Include reviewed_pages for every page re-reviewed, with review_status complete and issue_count equal to the number of additional updates found on that page. If no additional valid issues are found, return the same schema with reviewed_pages complete for every re-reviewed page and updates [].\n\n"
+        "AutoQC audit context, not drawing evidence:\n"
+        f"{json.dumps(context, ensure_ascii=False, indent=2)}\n\n"
+        "Prior AI JSON to avoid duplicating:\n"
+        f"{prior_json}\n\n"
+        "Final reminder: find only additional visible issues that were missed. Return only the JSON object."
+    )
+
+
 def build_manual_prompt(
     payload: dict[str, Any],
     prompt_run: dict[str, Any] | None = None,
@@ -898,6 +1057,8 @@ def build_manual_prompt(
             "prompt_version": prompt_run.get("prompt_version"),
             "generated_at": prompt_run.get("generated_at"),
             "included_full_extracted_text": False,
+            "included_sheet_evidence_context": bool(sheet_evidence_context and sheet_evidence_context.get("included")),
+            "sheet_evidence_packet_count": int((sheet_evidence_context or {}).get("packet_count") or 0),
             "prompt_template": {
                 "id": template.get("id"),
                 "name": template.get("name"),
@@ -1487,6 +1648,10 @@ def build_import_preview(
         "schema_version": parser_metadata.get("schema_version") or response.get("schema_version") or "autoqc-ai-updates-v1",
         "parser_mode": parser_metadata.get("parser_mode") or "unknown",
         "response_shape": parser_metadata.get("response_shape") or "unknown",
+        "review_modality": parser_metadata.get("review_modality"),
+        "audit_of_batch_id": parser_metadata.get("audit_of_batch_id"),
+        "audit_round": parser_metadata.get("audit_round"),
+        "audit_type": parser_metadata.get("audit_type"),
         "review_scope": review_scope,
         "review_strategy": parser_metadata.get("review_strategy"),
         "scope_pages": scope_pages,

@@ -11,6 +11,7 @@ This document preserves the original build brief, including legacy deterministic
 - Direct AI Review is currently experimental/text-context-only unless upgraded to true PDF/image-capable review and must pass the same coverage/import gates.
 - Final export requires complete imported review coverage, accepted findings, signoff, and validation readiness.
 - Raw pasted AI responses are preserved server-side for audit, while normal UI/API batch summaries expose only safe trace metadata.
+- AI import batches record review modality; missed-issue audit imports record prior batch lineage and yield.
 - Project packages validate before restore and strip local absolute paths from package JSON; restored paths are rebuilt from package contents.
 
 ## Purpose

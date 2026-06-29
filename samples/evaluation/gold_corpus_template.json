@@ -1,0 +1,64 @@
+{
+  "schema_version": "autoqc-gold-corpus-v2",
+  "description": "Template for measuring AutoQC engineering review usefulness. Keep private PDFs and raw AI responses outside the repository; replace synthetic examples with human-reviewed company packages before pilot decisions.",
+  "cases": [
+    {
+      "case_id": "synthetic_notes_typo",
+      "package_name": "Synthetic notes page",
+      "reviewer": "Local reviewer",
+      "private_artifacts": {
+        "pdf_path": "LOCAL_ONLY/redacted-or-private-package.pdf",
+        "autoqc_project_package": "LOCAL_ONLY/project-package.zip"
+      },
+      "expected_findings": [
+        {
+          "page_number": 2,
+          "target_text": "CONTINTUED",
+          "required_update": "Revise CONTINTUED to CONTINUED.",
+          "severity": "Minor",
+          "category": "drafting quality",
+          "expected_placement_status": "exact_target_found"
+        }
+      ],
+      "known_false_positives": [
+        {
+          "page_number": 1,
+          "target_text": "REGULATOR STATION GENERAL NOTES",
+          "reason": "Generic title text is not a drawing issue by itself."
+        }
+      ],
+      "missed_findings": [
+        {
+          "page_number": 2,
+          "target_text": "SEE DETAIL A/S-101",
+          "severity": "Minor",
+          "category": "drawing coordination",
+          "found_by": "second_pass_human_review"
+        }
+      ],
+      "actual_findings": [
+        {
+          "page_number": 2,
+          "target_text": "CONTINTUED",
+          "required_update": "Revise CONTINTUED to CONTINUED.",
+          "severity": "Minor",
+          "category": "drafting quality",
+          "placement_status": "exact_target_found",
+          "reviewer_disposition": "accepted",
+          "source_type": "manual_chat_prompt"
+        },
+        {
+          "page_number": 2,
+          "target_text": "SEE DETAIL A/S-101",
+          "required_update": "Verify the detail reference resolves.",
+          "severity": "Minor",
+          "category": "drawing coordination",
+          "placement_status": "page_level_fallback",
+          "reviewer_disposition": "needs_manual_placement",
+          "source_type": "missed_issue_audit",
+          "audit_of_batch_id": "local-batch-id"
+        }
+      ]
+    }
+  ]
+}

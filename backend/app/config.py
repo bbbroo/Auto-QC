@@ -36,6 +36,7 @@ class Settings:
         self.ai_max_sheets = int(os.getenv("AUTOQC_AI_MAX_SHEETS", "20"))
         self.use_sheet_evidence = _env_bool("AUTOQC_USE_SHEET_EVIDENCE", default=False)
         self.sheet_evidence_prompt_max_pages = int(os.getenv("AUTOQC_SHEET_EVIDENCE_PROMPT_MAX_PAGES", "80"))
+        self.sheet_evidence_max_prompt_chars = int(os.getenv("AUTOQC_SHEET_EVIDENCE_MAX_PROMPT_CHARS", "45000"))
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

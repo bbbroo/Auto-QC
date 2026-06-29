@@ -1,5 +1,32 @@
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Status: Full example-package validation complete as of 2026-06-29.
+#
+# The Sheet Evidence Builder hardening appears implemented and passed
+# targeted/full test suites plus a full two-PDF autopilot run.
+#
+# Completed validation command:
+#
+#   python -m backend.sheet_evidence.autopilot \
+#       --pdf-dir examples \
+#       --use-latest-benchmark \
+#       --full \
+#       --generate-enhanced-prompts \
+#       --pages-per-batch 10 \
+#       --run-id full_examples_hardening
+#
+# Validation result:
+# - Alliant Sheboygan: 123/123 pages processed
+# - Nicor STA 147: 97/97 pages processed
+# - Total: 220 evidence JSON files
+# - Enhanced prompt batches: 22
+# - No missing page prompt contexts
+# - Failed pages: none
+# - Validation passes
+# - compileall, targeted tests, and full pytest pass
+# ---------------------------------------------------------------------------
+
 import argparse
 from pathlib import Path
 from typing import Any

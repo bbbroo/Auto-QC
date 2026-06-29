@@ -34,6 +34,7 @@ export interface Project {
   status: string;
   source_pdf_path?: string | null;
   source_pdf_url?: string | null;
+  project_type?: "review" | "validation" | string | null;
   created_at?: string | null;
   updated_at?: string | null;
   summary?: string | null;
@@ -183,6 +184,7 @@ export interface AISettingsRequest {
 
 export interface AIReviewResponse {
   project: Project;
+  review_modality?: "manual_pdf_attached_external" | "text_context_only" | "pdf_image_direct" | string;
   direct_review_mode?: "text_context_only" | string;
   direct_review_sheet_limit_applied?: boolean;
   direct_review_sent_sheet_count?: number;
@@ -195,6 +197,8 @@ export interface AIReviewResponse {
   imported_finding_ids?: string[];
   batch?: AIImportBatch;
   quality_report?: ImportQualityReport;
+  missed_issue_audit_prompt?: string | null;
+  missed_issue_audit?: Record<string, unknown> | null;
   findings: Finding[];
 }
 
@@ -281,6 +285,10 @@ export interface AIPreviewResponse {
   schema_version?: string | null;
   parser_mode?: string | null;
   response_shape?: string | null;
+  review_modality?: "manual_pdf_attached_external" | "text_context_only" | "pdf_image_direct" | string | null;
+  audit_type?: string | null;
+  audit_of_batch_id?: string | null;
+  audit_round?: number | null;
   review_scope?: ManualReviewScope | string | null;
   review_strategy?: string | null;
   scope_pages?: number[];
@@ -304,6 +312,8 @@ export interface AIPreviewResponse {
   parser_repairs_applied: string[];
   warnings: string[];
   quality_report?: ImportQualityReport;
+  missed_issue_audit_prompt?: string | null;
+  missed_issue_audit?: Record<string, unknown> | null;
   updates: AIPreviewUpdate[];
   batch?: AIImportBatch;
 }
@@ -644,4 +654,26 @@ export interface MarkupMemoryRebuildResponse {
   memory_examples_upserted: number;
   outcome_counts: Record<string, number>;
   stats: MarkupMemoryStats;
+}
+
+export interface ValidationProjectCleanupResponse {
+  deleted_count: number;
+  deleted_project_ids: string[];
+  errors: Array<{ project_id: string; error: string }>;
+  remaining_by_type: Record<string, number>;
+}
+
+export interface ValidationProjectTagResponse {
+  dry_run: boolean;
+  matched_count: number;
+  tagged_count: number;
+  matched_project_ids: string[];
+  matched_projects: Array<{
+    id: string;
+    name: string;
+    updated_at?: string | null;
+    sheet_count?: number;
+    finding_count?: number;
+  }>;
+  remaining_by_type?: Record<string, number> | null;
 }

@@ -47,7 +47,7 @@ def main() -> None:
     create_large_wide_pdf(source_pdf)
 
     processor = PDFProcessor(db, settings)
-    project = db.create_project("Large Wide Stress Fixture")
+    project = db.create_project("Large Wide Stress Fixture", project_type="validation")
     processor.save_uploaded_pdf(project["id"], source_pdf.name, source_pdf.read_bytes())
     processed = processor.process_project(project["id"])
 

@@ -32,6 +32,8 @@ import type {
   Project,
   ReadinessResponse,
   Sheet,
+  ValidationProjectCleanupResponse,
+  ValidationProjectTagResponse,
 } from "./types";
 
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL as string | undefined;
@@ -138,8 +140,9 @@ function unwrapItem<T>(payload: unknown, key: string): T {
   return payload as T;
 }
 
-export async function listProjects(): Promise<Project[]> {
-  const payload = await request<unknown>("/projects");
+export async function listProjects(includeValidation = false): Promise<Project[]> {
+  const query = includeValidation ? "?include_validation=true" : "";
+  const payload = await request<unknown>(`/projects${query}`);
   return unwrapCollection<Project>(payload, ["projects", "items"]);
 }
 
@@ -172,6 +175,19 @@ export async function getProject(projectId: string): Promise<Project> {
 export async function deleteProject(projectId: string): Promise<void> {
   await request<unknown>(`/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
+  });
+}
+
+export async function deleteValidationProjects(): Promise<ValidationProjectCleanupResponse> {
+  return request<ValidationProjectCleanupResponse>("/maintenance/validation-projects", {
+    method: "DELETE",
+  });
+}
+
+export async function tagGeneratedValidationProjects(dryRun = false): Promise<ValidationProjectTagResponse> {
+  const query = dryRun ? "?dry_run=true" : "?dry_run=false";
+  return request<ValidationProjectTagResponse>(`/maintenance/validation-projects/tag-generated${query}`, {
+    method: "POST",
   });
 }
 
@@ -304,6 +320,9 @@ export async function previewManualAIResponse(
   promptVersion?: string | null,
   promptId?: string | null,
   sourceType = "manual_chat_prompt",
+  auditOfBatchId?: string | null,
+  auditRound?: number | null,
+  reviewModality?: string | null,
 ): Promise<AIPreviewResponse> {
   const payload = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/ai-review/preview`, {
     method: "POST",
@@ -312,6 +331,9 @@ export async function previewManualAIResponse(
       source_type: sourceType,
       prompt_version: promptVersion ?? undefined,
       prompt_id: promptId ?? undefined,
+      audit_of_batch_id: auditOfBatchId ?? undefined,
+      audit_round: auditRound ?? undefined,
+      review_modality: reviewModality ?? undefined,
     }),
   });
   return payload as AIPreviewResponse;
@@ -583,8 +605,31 @@ export function resolveAssetUrl(value?: string | null): string | undefined {
 
 export function getApiErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    return error.message;
+    return withRecoveryHint(error.message);
   }
 
   return "Unexpected request failure";
+}
+
+function withRecoveryHint(message: string): string {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("reviewed_pages")) {
+    return `${message} Ask the AI tool to return reviewed_pages for every scoped page, including pages with no updates.`;
+  }
+  if (normalized.includes("target_text")) {
+    return `${message} Each AI update must cite exact visible drawing text so AutoQC can place the markup credibly.`;
+  }
+  if (normalized.includes("final export") && normalized.includes("coverage")) {
+    return `${message} Import complete reviewed_pages coverage before attempting a final package.`;
+  }
+  if (normalized.includes("manual placement")) {
+    return `${message} Open the finding, use Place on drawing, or keep the package in draft mode.`;
+  }
+  if (normalized.includes("valid json") || normalized.includes("could not be repaired") || normalized.includes("json")) {
+    return `${message} Paste only the AI response JSON object, not the prompt or explanatory chat text.`;
+  }
+  if (normalized.includes("source pdf") || normalized.includes("project source pdf")) {
+    return `${message} Reopen the project package or re-upload the original PDF from managed project storage.`;
+  }
+  return message;
 }

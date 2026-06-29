@@ -52,7 +52,7 @@ def main() -> int:
 
     for source_pdf in pdfs[:limit]:
         start = time.perf_counter()
-        project = db.create_project(f"Real PDF Regression - {source_pdf.stem[:60]}")
+        project = db.create_project(f"Real PDF Regression - {source_pdf.stem[:60]}", project_type="validation")
         processor.save_uploaded_pdf(project["id"], source_pdf.name, source_pdf.read_bytes())
         processed = processor.process_project(project["id"])
         sheets = processed["sheets"]

@@ -34,6 +34,7 @@ import {
   createSampleProject,
   deleteFinding,
   deleteProject,
+  deleteValidationProjects,
   exportProject,
   exportProjectPackage,
   getReadiness,
@@ -67,12 +68,14 @@ import {
   saveManualPlacement,
   saveAISettings,
   selectProjectChecklist,
+  tagGeneratedValidationProjects,
   updateProjectChecklistItem,
   updateMarkupMemorySettings,
   updateFinding,
 } from "./api";
 import type {
   AIStatus,
+  AIReviewResponse,
   AIImportBatch,
   AIPreviewResponse,
   BatchRollbackPreview,
@@ -173,6 +176,25 @@ interface OverlayBoxPercent {
 
 type ViewerMode = "focus" | "sheet" | "marked";
 
+interface NoticeItem {
+  title: string;
+  detail: string;
+}
+
+interface UploadAssessment {
+  errors: string[];
+  warnings: NoticeItem[];
+}
+
+interface AIResponseAssessment {
+  blocking: string[];
+  warnings: NoticeItem[];
+  confirmations: string[];
+}
+
+const MAX_UPLOAD_MB = 250;
+const LARGE_UPLOAD_WARNING_MB = 100;
+
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -212,11 +234,20 @@ function App() {
   const [manualAIPreview, setManualAIPreview] = useState<AIPreviewResponse | null>(null);
   const [previewingManualAI, setPreviewingManualAI] = useState(false);
   const [manualAIImportMessage, setManualAIImportMessage] = useState<string | null>(null);
+  const [missedIssueAuditPrompt, setMissedIssueAuditPrompt] = useState<string | null>(null);
+  const [missedIssueAuditCopied, setMissedIssueAuditCopied] = useState(false);
+  const [missedIssueAuditSourceBatchId, setMissedIssueAuditSourceBatchId] = useState<string | null>(null);
+  const [missedIssueAuditSuggestedRound, setMissedIssueAuditSuggestedRound] = useState<number | null>(null);
+  const [pendingMissedIssueAuditBatchId, setPendingMissedIssueAuditBatchId] = useState<string | null>(null);
+  const [pendingMissedIssueAuditRound, setPendingMissedIssueAuditRound] = useState<number | null>(null);
   const [savingFindingId, setSavingFindingId] = useState<string | null>(null);
   const [deletingFindingId, setDeletingFindingId] = useState<string | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [exportingPackage, setExportingPackage] = useState(false);
   const [importingPackage, setImportingPackage] = useState(false);
+  const [showValidationProjects, setShowValidationProjects] = useState(false);
+  const [taggingValidationProjects, setTaggingValidationProjects] = useState(false);
+  const [cleaningValidationProjects, setCleaningValidationProjects] = useState(false);
   const [rollingBackBatchId, setRollingBackBatchId] = useState<string | null>(null);
   const [mergingFindingId, setMergingFindingId] = useState<string | null>(null);
   const [activeMarkedPdfUrl, setActiveMarkedPdfUrl] = useState<string | null>(null);
@@ -264,6 +295,7 @@ function App() {
     resolved: Math.max(0, findings.length - reviewQueueFindings.length),
   };
   const selectedPromptTemplate = promptTemplates.find((template) => template.id === selectedPromptTemplateId) ?? promptTemplates[0] ?? null;
+  const manualAIResponseAssessment = useMemo(() => assessManualAIResponse(manualAIResponse), [manualAIResponse]);
 
   function startOperation(title: string, steps: string[], message = steps[0] ?? "Working") {
     setOperation({
@@ -320,6 +352,12 @@ function App() {
       setSelectedFindingId(null);
       setManualAIImportMessage(null);
       setManualAIPreview(null);
+      setMissedIssueAuditPrompt(null);
+      setMissedIssueAuditCopied(false);
+      setMissedIssueAuditSourceBatchId(null);
+      setMissedIssueAuditSuggestedRound(null);
+      setPendingMissedIssueAuditBatchId(null);
+      setPendingMissedIssueAuditRound(null);
       setActiveMarkedPdfUrl(null);
       setPlacementMessage(null);
       setPlacementSummary(null);
@@ -331,12 +369,22 @@ function App() {
 
     setManualAIImportMessage(null);
     setManualAIPreview(null);
+    setMissedIssueAuditPrompt(null);
+    setMissedIssueAuditCopied(false);
+    setMissedIssueAuditSourceBatchId(null);
+    setMissedIssueAuditSuggestedRound(null);
+    setPendingMissedIssueAuditBatchId(null);
+    setPendingMissedIssueAuditRound(null);
     setActiveMarkedPdfUrl(null);
     setPlacementMessage(null);
     setPlacementSummary(null);
     setManualPlacementFindingId(null);
     void refreshReview(selectedProjectId);
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    void refreshProjects();
+  }, [showValidationProjects]);
 
   useEffect(() => {
     if (leftRailCard === "advanced") {
@@ -556,7 +604,7 @@ function App() {
     setError(null);
 
     try {
-      const nextProjects = await listProjects();
+      const nextProjects = await listProjects(showValidationProjects);
       setProjects(nextProjects);
       setSelectedProjectId((current) => {
         if (current && nextProjects.some((project) => project.id === current)) {
@@ -695,6 +743,62 @@ function App() {
       setError(getApiErrorMessage(requestError));
     } finally {
       setDeletingProjectId(null);
+    }
+  }
+
+  async function handleClearValidationProjects() {
+    const confirmed = window.confirm(
+      "Remove generated validation projects from the local AutoQC library? This deletes only projects marked as validation/test runs.",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setCleaningValidationProjects(true);
+    setError(null);
+    startOperation("Clean validation projects", ["Finding generated validation projects", "Deleting validation records", "Refreshing project library"]);
+
+    try {
+      advanceOperation(1, "Deleting generated validation project records and files.");
+      const result = await deleteValidationProjects();
+      advanceOperation(2, "Refreshing the project library.");
+      await refreshProjects();
+      setManualAIImportMessage(`Removed ${result.deleted_count} generated validation project${result.deleted_count === 1 ? "" : "s"}.`);
+      finishOperation("success", `Removed ${result.deleted_count} generated validation project${result.deleted_count === 1 ? "" : "s"}.`);
+    } catch (requestError) {
+      const message = getApiErrorMessage(requestError);
+      setError(message);
+      finishOperation("error", `Validation cleanup failed. ${message}`);
+    } finally {
+      setCleaningValidationProjects(false);
+    }
+  }
+
+  async function handleTagGeneratedValidationProjects() {
+    const confirmed = window.confirm(
+      "Tag historical smoke, stress, and real-PDF regression projects as generated validation runs? This does not delete any project files.",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setTaggingValidationProjects(true);
+    setError(null);
+    startOperation("Tag generated validation projects", ["Scanning project names", "Tagging generated runs", "Refreshing project library"]);
+
+    try {
+      advanceOperation(1, "Tagging known generated smoke, stress, and regression projects.");
+      const result = await tagGeneratedValidationProjects(false);
+      advanceOperation(2, "Refreshing the project library.");
+      await refreshProjects();
+      setManualAIImportMessage(`Tagged ${result.tagged_count} historical generated validation project${result.tagged_count === 1 ? "" : "s"}.`);
+      finishOperation("success", `Tagged ${result.tagged_count} historical generated validation project${result.tagged_count === 1 ? "" : "s"}.`);
+    } catch (requestError) {
+      const message = getApiErrorMessage(requestError);
+      setError(message);
+      finishOperation("error", `Validation tagging failed. ${message}`);
+    } finally {
+      setTaggingValidationProjects(false);
     }
   }
 
@@ -837,6 +941,12 @@ function App() {
     setError(null);
     setManualAIImportMessage(null);
     setManualAIPreview(null);
+    setMissedIssueAuditPrompt(null);
+    setMissedIssueAuditCopied(false);
+    setMissedIssueAuditSourceBatchId(null);
+    setMissedIssueAuditSuggestedRound(null);
+    setPendingMissedIssueAuditBatchId(null);
+    setPendingMissedIssueAuditRound(null);
     startOperation("Generate Chat Prompt", ["Selecting review scope", "Building prompt context", "Copying prompt"], "Selecting the next review scope.");
     try {
       const scopeOptions =
@@ -953,6 +1063,8 @@ function App() {
       const text = await navigator.clipboard.readText();
       setManualAIResponse(text);
       setManualAIPreview(null);
+      setMissedIssueAuditPrompt(null);
+      setMissedIssueAuditCopied(false);
       setManualAIImportMessage(text.trim() ? "Pasted AI response from clipboard." : "Clipboard was empty.");
     } catch {
       setError("Could not read from clipboard. Paste the AI JSON manually or import a .json/.txt file.");
@@ -968,6 +1080,8 @@ function App() {
       const text = await file.text();
       setManualAIResponse(text);
       setManualAIPreview(null);
+      setMissedIssueAuditPrompt(null);
+      setMissedIssueAuditCopied(false);
       setManualAIImportMessage(`Loaded AI response from ${file.name}.`);
     } catch {
       setError(`Could not read ${file.name}. Paste the AI JSON manually instead.`);
@@ -988,19 +1102,30 @@ function App() {
     if (!selectedProjectId || !manualAIResponse.trim() || previewingManualAI) {
       return;
     }
+    const blockingIssue = manualAIResponseAssessment.blocking[0];
+    if (blockingIssue) {
+      setError(blockingIssue);
+      return;
+    }
     setPreviewingManualAI(true);
     setError(null);
     setManualAIImportMessage(null);
     startOperation("Preview AI response", ["Parsing pasted response", "Checking reviewed_pages coverage", "Checking duplicates and placement"], "Parsing the pasted ChatGPT/Copilot response.");
     try {
+      const sourceType = pendingMissedIssueAuditBatchId ? "missed_issue_audit" : "manual_chat_prompt";
       const preview = await previewManualAIResponse(
         selectedProjectId,
         manualAIResponse,
         manualAIPromptVersion,
         manualAIPromptId,
+        sourceType,
+        pendingMissedIssueAuditBatchId,
+        pendingMissedIssueAuditRound,
+        "manual_pdf_attached_external",
       );
       advanceOperation(1, "Checking reviewed_pages against the expected review scope.");
       setManualAIPreview(preview);
+      updateMissedIssueAuditPrompt(preview);
       setManualAIImportMessage(
         preview.review_coverage_status !== "complete"
           ? `Preview found ${preview.valid_recoverable_updates} valid AI update${preview.valid_recoverable_updates === 1 ? "" : "s"}, but import is blocked until reviewed_pages confirms every expected page.`
@@ -1043,6 +1168,10 @@ function App() {
               manualAIResponse,
               manualAIPromptVersion,
               manualAIPromptId,
+              pendingMissedIssueAuditBatchId ? "missed_issue_audit" : "manual_chat_prompt",
+              pendingMissedIssueAuditBatchId,
+              pendingMissedIssueAuditRound,
+              "manual_pdf_attached_external",
             )
           : null);
       if (!preview || preview.review_coverage_status !== "complete" || (preview.valid_recoverable_updates === 0 && !preview.scoped_review_complete)) {
@@ -1050,6 +1179,7 @@ function App() {
       }
       advanceOperation(1, "Writing valid AI updates and preserving raw response trace metadata.");
       const result = await importManualAIPreview(selectedProjectId, preview.batch_id);
+      updateMissedIssueAuditPrompt(result);
       const importedFindingIds = new Set(result.imported_finding_ids ?? []);
       const importedStableIds = new Set(result.imported_stable_ids ?? []);
       const aiFinding =
@@ -1066,16 +1196,19 @@ function App() {
       }
       const importedCount = result.ai_updates_imported ?? result.ai_findings_created;
       const skippedCount = Math.max(0, result.raw_ai_count - importedCount);
-      setManualAIImportMessage(
-        importedCount === 0 && preview.review_coverage_status === "complete"
+      const importMessage = pendingMissedIssueAuditBatchId
+        ? `Imported ${importedCount} missed-issue audit update${importedCount === 1 ? "" : "s"}${skippedCount ? ` (${skippedCount} skipped)` : ""}.`
+        : importedCount === 0 && preview.review_coverage_status === "complete"
           ? "Recorded scoped review as complete with no AI updates."
-          : `Imported ${importedCount} AI update${importedCount === 1 ? "" : "s"}${skippedCount ? ` (${skippedCount} skipped)` : ""}.`,
-      );
+          : `Imported ${importedCount} AI update${importedCount === 1 ? "" : "s"}${skippedCount ? ` (${skippedCount} skipped)` : ""}.`;
+      setManualAIImportMessage(importMessage);
       setManualAIResponse("");
       setManualAIPrompt(null);
       setManualAIPromptId(null);
       setManualAIPromptVersion(null);
       setManualAIPreview(null);
+      setPendingMissedIssueAuditBatchId(null);
+      setPendingMissedIssueAuditRound(null);
       advanceOperation(3, "Import complete. Refreshing coverage, findings, and review plan.");
       await refreshReview(selectedProjectId);
       const nextPlan = await getManualReviewPlan(selectedProjectId, largePackageBatchSize).catch(() => null);
@@ -1095,6 +1228,37 @@ function App() {
       finishOperation("error", `Import failed. AutoQC will keep or restore the last recoverable project state where possible. ${message}`);
     } finally {
       setImportingManualAI(false);
+    }
+  }
+
+  function updateMissedIssueAuditPrompt(payload: AIPreviewResponse | AIReviewResponse | null | undefined) {
+    const prompt = typeof payload?.missed_issue_audit_prompt === "string" ? payload.missed_issue_audit_prompt.trim() : "";
+    if (prompt) {
+      const audit = payload?.missed_issue_audit && typeof payload.missed_issue_audit === "object" ? payload.missed_issue_audit : {};
+      const priorBatchId =
+        typeof audit.prior_import_batch_id === "string"
+          ? audit.prior_import_batch_id
+          : "batch_id" in (payload ?? {}) && typeof (payload as AIPreviewResponse).batch_id === "string"
+            ? (payload as AIPreviewResponse).batch_id
+            : payload?.batch?.id ?? null;
+      const nextRound = typeof audit.next_audit_round === "number" ? audit.next_audit_round : 1;
+      setMissedIssueAuditPrompt(prompt);
+      setMissedIssueAuditCopied(false);
+      setMissedIssueAuditSourceBatchId(priorBatchId);
+      setMissedIssueAuditSuggestedRound(nextRound);
+    }
+  }
+
+  async function handleCopyMissedIssueAuditPrompt() {
+    if (!missedIssueAuditPrompt) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(missedIssueAuditPrompt);
+      setMissedIssueAuditCopied(true);
+      setManualAIImportMessage("Copied the second-pass missed-issue audit prompt.");
+    } catch {
+      setError("Could not copy the missed-issue audit prompt. Select the prompt text and copy it manually.");
     }
   }
 
@@ -1652,16 +1816,6 @@ function App() {
                 </div>
                 <div className="topbar-button-row">
                   <button
-                    className="ai-action"
-                    type="button"
-                    disabled={!selectedProjectId || runningAIReview}
-                    title="Experimental direct AI review uses extracted text context only and is not equivalent to the PDF-attached Chat Prompt workflow"
-                    onClick={() => void handleRunAIReview()}
-                  >
-                    <Sparkles size={14} className={runningAIReview ? "spin" : ""} />
-                    {runningAIReview ? "AI reviewing" : "Direct AI (Text Only)"}
-                  </button>
-                  <button
                     className="ai-action manual-ai-action"
                     type="button"
                     disabled={!selectedProjectId || generatingManualPrompt}
@@ -1683,6 +1837,16 @@ function App() {
                   >
                     <RefreshCw size={14} className={loadingProjects || loadingReview ? "spin" : ""} />
                     Sync
+                  </button>
+                  <button
+                    className="secondary-button compact-action experimental-ai-action"
+                    type="button"
+                    disabled={!selectedProjectId || runningAIReview}
+                    title="Advanced experimental lab path. Uses extracted text context only and is not equivalent to the PDF-attached Chat Prompt workflow."
+                    onClick={() => void handleRunAIReview()}
+                  >
+                    {runningAIReview ? <Sparkles size={14} className="spin" /> : <AlertTriangle size={14} />}
+                    {runningAIReview ? "AI reviewing" : "Text-only AI Lab"}
                   </button>
                 </div>
               </div>
@@ -1869,6 +2033,12 @@ function App() {
                     <textarea className="manual-ai-textarea" readOnly value={manualAIPrompt} rows={8} />
                   </label>
 
+                  {pendingMissedIssueAuditBatchId ? (
+                    <div className="inline-helper success-helper" role="status">
+                      Second-pass audit import armed for batch {pendingMissedIssueAuditBatchId.slice(0, 8)}. The next preview/import will record missed-issue audit lineage and yield.
+                    </div>
+                  ) : null}
+
                   <div
                     className="manual-import-dropzone"
                     onDragOver={(event) => event.preventDefault()}
@@ -1887,6 +2057,7 @@ function App() {
                         placeholder='Paste JSON like {"updates":[...]}, or drag a .json/.txt response file here.'
                       />
                     </label>
+                    <AIResponsePreflightPanel assessment={manualAIResponseAssessment} />
                     <div className="manual-import-tools">
                       <button className="secondary-button" type="button" onClick={() => void handlePasteManualAIResponse()} title="Read the AI response JSON from your clipboard">
                         <ClipboardPaste size={16} />
@@ -1947,13 +2118,19 @@ function App() {
               deletingProjectId={deletingProjectId}
               exportingPackage={exportingPackage}
               importingPackage={importingPackage}
+              showValidationProjects={showValidationProjects}
+              taggingValidationProjects={taggingValidationProjects}
+              cleaningValidationProjects={cleaningValidationProjects}
               onSelectProject={setSelectedProjectId}
               onRefresh={refreshProjects}
+              onShowValidationProjectsChange={setShowValidationProjects}
               onUpload={handleUpload}
               onSampleProject={handleSampleProject}
               onDeleteProject={handleDeleteProject}
               onExportPackage={handleExportProjectPackage}
               onImportPackage={handleImportProjectPackage}
+              onTagGeneratedValidationProjects={handleTagGeneratedValidationProjects}
+              onClearValidationProjects={handleClearValidationProjects}
             />
           ) : null}
 
@@ -2076,6 +2253,34 @@ function App() {
         </section>
       </main>
 
+      <MissedIssueAuditPromptPanel
+        prompt={missedIssueAuditPrompt}
+        copied={missedIssueAuditCopied}
+        sourceBatchId={missedIssueAuditSourceBatchId}
+        auditRound={missedIssueAuditSuggestedRound}
+        onCopy={handleCopyMissedIssueAuditPrompt}
+        onUseAsPrompt={() => {
+          if (!missedIssueAuditPrompt) {
+            return;
+          }
+          setManualAIPrompt(missedIssueAuditPrompt);
+          setManualAIPromptId(null);
+          setManualAIPromptVersion(null);
+          setManualAIResponse("");
+          setManualAIPreview(null);
+          setPendingMissedIssueAuditBatchId(missedIssueAuditSourceBatchId);
+          setPendingMissedIssueAuditRound(missedIssueAuditSuggestedRound);
+          setLeftRailCard("review");
+        }}
+        onClose={() => {
+          setMissedIssueAuditPrompt(null);
+          setMissedIssueAuditCopied(false);
+          setMissedIssueAuditSourceBatchId(null);
+          setMissedIssueAuditSuggestedRound(null);
+          setPendingMissedIssueAuditBatchId(null);
+          setPendingMissedIssueAuditRound(null);
+        }}
+      />
     </div>
   );
 }
@@ -2089,13 +2294,19 @@ interface ProjectsPanelProps {
   deletingProjectId: string | null;
   exportingPackage: boolean;
   importingPackage: boolean;
+  showValidationProjects: boolean;
+  taggingValidationProjects: boolean;
+  cleaningValidationProjects: boolean;
   onSelectProject: (projectId: string) => void;
   onRefresh: () => Promise<void>;
+  onShowValidationProjectsChange: (value: boolean) => void;
   onUpload: (name: string, file: File) => Promise<void>;
   onSampleProject: () => Promise<void>;
   onDeleteProject: (project: Project) => Promise<void>;
   onExportPackage: () => Promise<void>;
   onImportPackage: (file: File | null) => Promise<void>;
+  onTagGeneratedValidationProjects: () => Promise<void>;
+  onClearValidationProjects: () => Promise<void>;
 }
 
 function OperationProgressPanel({ operation, onDismiss }: { operation: OperationProgress; onDismiss?: () => void }) {
@@ -2128,6 +2339,55 @@ function OperationProgressPanel({ operation, onDismiss }: { operation: Operation
       </div>
       <small>{active ? `${elapsedSeconds}s elapsed` : formatStatus(operation.status)}</small>
     </section>
+  );
+}
+
+function MissedIssueAuditPromptPanel({
+  prompt,
+  copied,
+  sourceBatchId,
+  auditRound,
+  onCopy,
+  onUseAsPrompt,
+  onClose,
+}: {
+  prompt: string | null;
+  copied: boolean;
+  sourceBatchId: string | null;
+  auditRound: number | null;
+  onCopy: () => void;
+  onUseAsPrompt: () => void;
+  onClose: () => void;
+}) {
+  if (!prompt) {
+    return null;
+  }
+
+  return (
+    <aside className="missed-issue-audit-panel" aria-label="Second-pass missed issue audit prompt">
+      <div className="missed-issue-audit-header">
+        <div>
+          <strong>Second-pass audit recommended</strong>
+          <span>AutoQC generated a follow-up prompt to search for issues missed in the first AI response.</span>
+        </div>
+        <button type="button" className="ghost-button" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <textarea className="missed-issue-audit-textarea" value={prompt} readOnly />
+      <div className="missed-issue-audit-actions">
+        <button type="button" className="primary-button" onClick={onCopy}>
+          {copied ? "Copied" : "Copy missed-issue audit prompt"}
+        </button>
+        <button type="button" className="secondary-button" onClick={onUseAsPrompt}>
+          Use as next prompt
+        </button>
+        <span>
+          Paste this into the same ChatGPT/Copilot chat with the same PDF attached, then import the second JSON back into AutoQC.
+          {sourceBatchId ? ` The next import will be linked as audit round ${auditRound ?? 1} for batch ${sourceBatchId.slice(0, 8)}.` : ""}
+        </span>
+      </div>
+    </aside>
   );
 }
 
@@ -2385,6 +2645,8 @@ function AIPreviewPanel({ preview }: { preview: AIPreviewResponse | null }) {
     return null;
   }
 
+  const decision = previewImportDecision(preview);
+
   return (
     <div className="ai-preview-panel" aria-label="AI import preview">
       <div className="preview-summary">
@@ -2400,6 +2662,13 @@ function AIPreviewPanel({ preview }: { preview: AIPreviewResponse | null }) {
         <span>{formatStatus(preview.parser_mode ?? "parser unknown")}</span>
         <span>{formatStatus(preview.response_shape ?? "shape unknown")}</span>
         {preview.review_scope ? <span>{formatStatus(preview.review_scope)}</span> : null}
+      </div>
+      <div className={`preview-decision ${decision.status}`} role={decision.status === "blocked" ? "alert" : "status"}>
+        {decision.status === "ready" ? <Check size={15} /> : <AlertTriangle size={15} />}
+        <div>
+          <strong>{decision.title}</strong>
+          <span>{decision.detail}</span>
+        </div>
       </div>
       <div className={`coverage-banner coverage-${statusClass(preview.review_coverage_status ?? "not_confirmed")}`} role="status">
         <strong>Review coverage {formatStatus(preview.review_coverage_status ?? "not_confirmed")}</strong>
@@ -2484,6 +2753,37 @@ function AIPreviewPanel({ preview }: { preview: AIPreviewResponse | null }) {
   );
 }
 
+function AIResponsePreflightPanel({ assessment }: { assessment: AIResponseAssessment }) {
+  const hasContent = assessment.blocking.length > 0 || assessment.warnings.length > 0 || assessment.confirmations.length > 0;
+  if (!hasContent) {
+    return null;
+  }
+
+  return (
+    <div className="ai-response-preflight" role="status" aria-label="AI response preflight">
+      {assessment.blocking.map((item) => (
+        <span className="preflight-blocking" key={item}>
+          <AlertTriangle size={13} />
+          {item}
+        </span>
+      ))}
+      {assessment.warnings.map((warning) => (
+        <span className="preflight-warning" key={`${warning.title}-${warning.detail}`}>
+          <AlertTriangle size={13} />
+          <strong>{warning.title}</strong>
+          {warning.detail}
+        </span>
+      ))}
+      {assessment.confirmations.map((item) => (
+        <span className="preflight-ok" key={item}>
+          <Check size={13} />
+          {item}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function AIImportHistory({
   batches,
   rollingBackBatchId,
@@ -2519,6 +2819,13 @@ function AIImportHistory({
             {batch.raw_response_stored ? (
               <small>Raw response stored server-side ({batch.raw_response_length ?? 0} chars, sha256 {String(batch.raw_response_sha256 ?? "").slice(0, 12) || "unavailable"})</small>
             ) : null}
+            {batch.metadata?.review_modality ? <small>Review modality: {reviewModalityLabel(String(batch.metadata.review_modality))}</small> : null}
+            {batch.metadata?.audit_of_batch_id ? (
+              <small>
+                Missed-issue audit round {String(batch.metadata.audit_round ?? 1)} of batch {String(batch.metadata.audit_of_batch_id).slice(0, 8)}
+                {" | "}yield {String(batch.metadata.audit_yield_count ?? 0)}
+              </small>
+            ) : null}
             {batch.metadata?.direct_review_mode === "text_context_only" ? <small>Direct AI Review: text-context-only, experimental.</small> : null}
             {batch.parser_warnings?.length ? <small>{batch.parser_warnings[0]}</small> : null}
             {batch.import_status === "imported" ? (
@@ -2553,6 +2860,55 @@ function previewActionLabel(action?: string): string {
   return "Skipped";
 }
 
+function previewImportDecision(preview: AIPreviewResponse): { status: "ready" | "blocked" | "warning"; title: string; detail: string } {
+  if (preview.review_coverage_status !== "complete") {
+    return {
+      status: "blocked",
+      title: "Import blocked by coverage",
+      detail: `Ask the AI tool to return reviewed_pages for every expected page. Missing pages: ${formatPageList(preview.missing_review_pages)}.`,
+    };
+  }
+  if (preview.valid_recoverable_updates === 0 && preview.scoped_review_complete) {
+    return {
+      status: "ready",
+      title: "Ready to record clean review",
+      detail: "The response confirmed the scoped pages were reviewed and returned no importable updates.",
+    };
+  }
+  if (preview.valid_recoverable_updates === 0) {
+    return {
+      status: "blocked",
+      title: "No importable updates",
+      detail: "Review skipped reasons below. Most often this means missing target_text, required_update, or usable page numbers.",
+    };
+  }
+  if (preview.skipped_updates > 0 || preview.duplicate_updates) {
+    return {
+      status: "warning",
+      title: "Ready with review warnings",
+      detail: `${preview.valid_recoverable_updates} update${preview.valid_recoverable_updates === 1 ? "" : "s"} can import; ${preview.skipped_updates} skipped and ${preview.duplicate_updates ?? 0} duplicate.`,
+    };
+  }
+  return {
+    status: "ready",
+    title: "Ready to import",
+    detail: `${preview.valid_recoverable_updates} AI update${preview.valid_recoverable_updates === 1 ? "" : "s"} passed field, duplicate, and coverage checks.`,
+  };
+}
+
+function reviewModalityLabel(value: string): string {
+  if (value === "manual_pdf_attached_external") {
+    return "manual PDF-attached external";
+  }
+  if (value === "text_context_only") {
+    return "text-context-only";
+  }
+  if (value === "pdf_image_direct") {
+    return "direct PDF/image";
+  }
+  return value;
+}
+
 function confidenceText(value?: number | null): string {
   return typeof value === "number" ? confidenceLabel(value) : "";
 }
@@ -2582,6 +2938,148 @@ function formatPageList(pages?: number[]): string {
   }
   const shown = pages.slice(0, 12).join(", ");
   return pages.length > 12 ? `${shown}, +${pages.length - 12} more` : shown;
+}
+
+function assessUploadInput(projectName: string, file: File | null): UploadAssessment {
+  const errors: string[] = [];
+  const warnings: NoticeItem[] = [];
+  const trimmedName = projectName.trim();
+  if (trimmedName.length > 120) {
+    errors.push("Keep the project name under 120 characters so exports and packages have readable filenames.");
+  }
+  if (/[<>:"\/\\|?*\x00-\x1F]/.test(trimmedName)) {
+    errors.push("Project names cannot contain path characters such as /, \\, :, *, ?, <, >, or |.");
+  }
+  if (/^(test|demo|sample|project|review)$/i.test(trimmedName)) {
+    warnings.push({
+      title: "Generic project name",
+      detail: "Use a package, station, or job identifier so exported reports are traceable.",
+    });
+  }
+
+  if (!file) {
+    errors.push("Select a PDF drawing package before uploading.");
+    return { errors, warnings };
+  }
+
+  const lowerName = file.name.toLowerCase();
+  const looksLikePdf = file.type === "application/pdf" || lowerName.endsWith(".pdf");
+  if (!looksLikePdf) {
+    errors.push("AutoQC only accepts PDF drawing packages. Choose a .pdf file.");
+  }
+  if (file.size <= 0) {
+    errors.push("The selected PDF is empty. Choose the actual drawing package file.");
+  }
+  const maxBytes = MAX_UPLOAD_MB * 1024 * 1024;
+  if (file.size > maxBytes) {
+    errors.push(`The selected PDF is ${formatBytes(file.size)}, above the ${MAX_UPLOAD_MB} MB local upload limit.`);
+  }
+  if (file.size > LARGE_UPLOAD_WARNING_MB * 1024 * 1024 && file.size <= maxBytes) {
+    warnings.push({
+      title: "Large package",
+      detail: "Extraction can take several minutes. Keep the browser open until the upload operation finishes.",
+    });
+  }
+  if (/\.(pdf)\.[a-z0-9]+$/i.test(file.name)) {
+    warnings.push({
+      title: "Unexpected filename",
+      detail: "The file has another extension after .pdf. Confirm this is the original drawing package, not a renamed export.",
+    });
+  }
+  if (/(draft|prelim|preliminary|not[-_\s]?for[-_\s]?construction|superseded|void|obsolete)/i.test(file.name) || /(draft|prelim|preliminary|superseded|void|obsolete)/i.test(trimmedName)) {
+    warnings.push({
+      title: "Issue-status caution",
+      detail: "This package name suggests a draft or superseded set. Keep exports in draft mode unless the responsible reviewer confirms it is appropriate for final signoff.",
+    });
+  }
+  return { errors, warnings };
+}
+
+function assessManualAIResponse(text: string): AIResponseAssessment {
+  const trimmed = text.trim();
+  const blocking: string[] = [];
+  const warnings: NoticeItem[] = [];
+  const confirmations: string[] = [];
+  if (!trimmed) {
+    return { blocking, warnings, confirmations };
+  }
+
+  const lower = trimmed.toLowerCase();
+  const looksLikePrompt =
+    /you are acting as|manual review instructions|required response schema|autoqc enhanced manual review prompt|pages in scope/i.test(trimmed)
+    && /attach(ed)? pdf|chatgpt|copilot|return only valid json/i.test(trimmed);
+  if (looksLikePrompt) {
+    blocking.push("This looks like the prompt text, not the AI response. Run it in ChatGPT/Copilot with the PDF attached, then paste the returned JSON.");
+    return { blocking, warnings, confirmations };
+  }
+
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[") && !trimmed.startsWith("```")) {
+    warnings.push({
+      title: "Response wrapper",
+      detail: "Preview can sometimes recover JSON from surrounding text, but safest input is the raw JSON object only.",
+    });
+  }
+  if (!lower.includes("reviewed_pages")) {
+    warnings.push({
+      title: "Missing reviewed_pages",
+      detail: "Imports and final coverage need reviewed_pages entries for every scoped page, including clean pages.",
+    });
+  } else {
+    confirmations.push("reviewed_pages field detected.");
+  }
+  if (!lower.includes("updates")) {
+    warnings.push({
+      title: "Missing updates array",
+      detail: "The response should include an updates array, even when no issues were found.",
+    });
+  } else {
+    confirmations.push("updates field detected.");
+  }
+  if (!lower.includes("schema_version")) {
+    warnings.push({
+      title: "Schema version not visible",
+      detail: "Expected schema_version is autoqc-ai-updates-v1. Preview will still try to parse compatible JSON.",
+    });
+  }
+  if (!lower.includes("target_text")) {
+    warnings.push({
+      title: "No target_text found",
+      detail: "Updates without exact visible drawing text are skipped because they cannot be placed credibly on the PDF.",
+    });
+  }
+  if (!lower.includes("required_update") && !lower.includes("recommended_update")) {
+    warnings.push({
+      title: "No required_update found",
+      detail: "Each update needs a specific drawing change request before it can become a useful finding.",
+    });
+  }
+  if (/"confidence"\s*:\s*"(high|medium|low)"/i.test(trimmed)) {
+    warnings.push({
+      title: "Text confidence",
+      detail: "The preferred confidence format is numeric from 0.0 to 1.0; preview may still normalize common values.",
+    });
+  }
+  if (trimmed.length > 1_500_000) {
+    warnings.push({
+      title: "Very large response",
+      detail: "Large pasted responses are slower to parse. Consider using smaller page batches if preview feels sluggish.",
+    });
+  }
+  return { blocking, warnings, confirmations };
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
 function nextUnreviewedBatch(plan: ManualReviewPlan | null): ManualReviewBatch | null {
@@ -2631,7 +3129,8 @@ function workflowSteps(
   const importedBatch = batches.find((batch) => batch.import_status === "imported");
   const promptGenerated = events.some((event) => event.action === "manual_ai_prompt_generated");
   const draftExported = events.some((event) => event.action === "draft_export_created" || event.action === "export_created");
-  const finalExported = events.some((event) => event.action === "final_export_created");
+  const latestFinalEvent = events.find((event) => event.action === "final_export_created" || event.action === "final_export_blocked");
+  const finalExported = latestFinalEvent?.action === "final_export_created";
   const coverage = project?.review_coverage ?? latestImportCoverage(importedBatch);
   const coverageComplete = coverage?.review_coverage_status === "complete";
   const needsReview = countFindingsByStatus(findings, "needs_review");
@@ -2728,7 +3227,8 @@ function recoveryCards(
 ): RecoveryCard[] {
   const cards: RecoveryCard[] = [];
   const latestFailedBatch = batches.find((batch) => batch.import_status === "failed");
-  const latestFinalBlock = events.find((event) => event.action === "final_export_blocked");
+  const latestFinalEvent = events.find((event) => event.action === "final_export_created" || event.action === "final_export_blocked");
+  const latestFinalBlock = latestFinalEvent?.action === "final_export_blocked" ? latestFinalEvent : undefined;
   const coverage = project?.review_coverage;
   const manualPlacement = manualPlacementBlockerCount(findings);
   const importedBatch = batches.find((batch) => batch.import_status === "imported");
@@ -2864,6 +3364,41 @@ function finalExportBlockerSummary(coverage: ReviewCoverageSummary | null | unde
     blockers.push(`${manualPlacementCount} finding${manualPlacementCount === 1 ? "" : "s"} need manual placement`);
   }
   return blockers.length ? `Final export blocked: ${blockers.join("; ")}.` : "Final export readiness is complete.";
+}
+
+function finalReviewerNameIssue(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) {
+    return "Enter the responsible reviewer name before creating a final export.";
+  }
+  if (/^(local reviewer|reviewer|engineer|user|test|demo)$/i.test(trimmed)) {
+    return "Replace the placeholder reviewer name with the responsible reviewer or engineer.";
+  }
+  if (/[<>:"\/\\|?*\x00-\x1F]/.test(trimmed)) {
+    return "Reviewer name cannot contain path characters such as /, \\, :, *, ?, <, >, or |.";
+  }
+  return null;
+}
+
+function exportResultTitle(result: ExportResponse): string {
+  const mode = result.export_mode === "final" ? "Final export" : "Draft export";
+  const validation = validationStatusLabel(result.validation?.status ?? "not_reported").toLowerCase();
+  return `${mode} created with ${validation} validation`;
+}
+
+function exportResultExplanation(result: ExportResponse): string {
+  const count = result.findings_exported ?? 0;
+  const validation = result.validation?.status ?? "not_reported";
+  if (result.export_mode === "final") {
+    return `Final package includes ${count} accepted finding${count === 1 ? "" : "s"} with reviewer signoff. Open the marked PDF and QA report before external issue.`;
+  }
+  if (validation === "failed") {
+    return `Draft package was written, but PDF validation failed. Do not rely on the marked PDF until the validation errors are resolved.`;
+  }
+  if (validation === "warning") {
+    return `Draft package includes ${count} finding${count === 1 ? "" : "s"} and has validation warnings. Review the warnings before using the PDF.`;
+  }
+  return `Draft package includes ${count} finding${count === 1 ? "" : "s"}. Use final export only after accepted findings, complete coverage, placement cleanup, and signoff.`;
 }
 
 function DashboardSummary({
@@ -3311,30 +3846,31 @@ function ProjectsPanel({
   deletingProjectId,
   exportingPackage,
   importingPackage,
+  showValidationProjects,
+  taggingValidationProjects,
+  cleaningValidationProjects,
   onSelectProject,
   onRefresh,
+  onShowValidationProjectsChange,
   onUpload,
   onSampleProject,
   onDeleteProject,
   onExportPackage,
   onImportPackage,
+  onTagGeneratedValidationProjects,
+  onClearValidationProjects,
 }: ProjectsPanelProps) {
   const [name, setName] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
-
-  function validatePdf(candidate: File | null): string | null {
-    if (!candidate) {
-      return "Select a PDF drawing package before uploading.";
-    }
-
-    const looksLikePdf = candidate.type === "application/pdf" || candidate.name.toLowerCase().endsWith(".pdf");
-    return looksLikePdf ? null : "AutoQC only accepts PDF drawing packages. Choose a .pdf file.";
-  }
+  const validationProjectCount = projects.filter((project) => project.project_type === "validation").length;
+  const uploadAssessment = assessUploadInput(name, file);
+  const blockingUploadError = uploadAssessment.errors[0] ?? null;
+  const displayedUploadError = uploadError ?? (file ? blockingUploadError : null);
 
   function handleFileChange(candidate: File | null) {
     setFile(candidate);
-    setUploadError(candidate ? validatePdf(candidate) : null);
+    setUploadError(null);
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -3343,9 +3879,10 @@ function ProjectsPanel({
       return;
     }
 
-    const validationMessage = validatePdf(file);
+    const assessment = assessUploadInput(name, file);
+    const validationMessage = assessment.errors[0] ?? null;
     if (validationMessage || !file) {
-      setUploadError(validationMessage);
+      setUploadError(validationMessage ?? "Select a PDF drawing package before uploading.");
       return;
     }
 
@@ -3384,7 +3921,10 @@ function ProjectsPanel({
             <input
               type="text"
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                setName(event.target.value);
+                setUploadError(null);
+              }}
               placeholder="Regulator station package"
               title="Optional project name for this drawing review"
             />
@@ -3400,20 +3940,32 @@ function ProjectsPanel({
             />
           </label>
 
-          {file && !uploadError ? (
-            <div className="inline-helper" role="status">Ready to upload: {file.name}</div>
+          {file && !displayedUploadError ? (
+            <div className="inline-helper" role="status">Ready to upload: {file.name} ({formatBytes(file.size)}).</div>
           ) : null}
 
-          {uploadError ? (
-            <div className="inline-error compact-error" role="alert">{uploadError}</div>
+          {displayedUploadError ? (
+            <div className="inline-error compact-error" role="alert">{displayedUploadError}</div>
+          ) : null}
+
+          {uploadAssessment.warnings.length ? (
+            <div className="risk-checklist" role="status" aria-label="Upload cautions">
+              {uploadAssessment.warnings.map((warning) => (
+                <span key={`${warning.title}-${warning.detail}`}>
+                  <AlertTriangle size={13} />
+                  <strong>{warning.title}</strong>
+                  {warning.detail}
+                </span>
+              ))}
+            </div>
           ) : null}
 
           <div className="button-row">
             <button
               className="primary-button"
               type="submit"
-              disabled={!file || Boolean(uploadError) || uploading}
-              title={uploadError ? uploadError : file ? "Upload this PDF and extract sheets, page images, and prompt context" : "Select a PDF before uploading"}
+              disabled={!file || Boolean(blockingUploadError) || uploading}
+              title={blockingUploadError ? blockingUploadError : file ? "Upload this PDF and extract sheets, page images, and prompt context" : "Select a PDF before uploading"}
             >
               {uploading ? <Loader2 size={17} className="spin" /> : <Upload size={17} />}
               Upload
@@ -3468,11 +4020,46 @@ function ProjectsPanel({
       </details>
 
       <div className="project-list" aria-label="Project list">
+        <div className="validation-project-controls">
+          <label className="toggle-row compact-toggle" title="Validation scripts mark their generated projects so normal reviews stay uncluttered.">
+            <input
+              type="checkbox"
+              checked={showValidationProjects}
+              onChange={(event) => onShowValidationProjectsChange(event.target.checked)}
+            />
+            <span>Show generated validation projects</span>
+          </label>
+          <button
+            className="secondary-button compact-action"
+            type="button"
+            disabled={taggingValidationProjects || cleaningValidationProjects}
+            onClick={() => void onTagGeneratedValidationProjects()}
+            title="Tag historical smoke, stress, and real-PDF regression projects as generated validation runs"
+          >
+            {taggingValidationProjects ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />}
+            Tag old validation runs
+          </button>
+          <button
+            className="secondary-button compact-action"
+            type="button"
+            disabled={cleaningValidationProjects || taggingValidationProjects}
+            onClick={() => void onClearValidationProjects()}
+            title="Delete projects marked as generated validation/test runs"
+          >
+            {cleaningValidationProjects ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />}
+            Clean validation runs
+          </button>
+          <small>
+            {showValidationProjects
+              ? `${validationProjectCount} generated validation project${validationProjectCount === 1 ? "" : "s"} shown.`
+              : "Generated validation projects are hidden by default."}
+          </small>
+        </div>
         {projects.length === 0 ? (
           <div className="empty-state compact">
             <FileText size={18} />
             <strong>No projects yet</strong>
-            <small>Upload a PDF drawing set or create the sample package to start the AutoQC workflow.</small>
+            <small>{showValidationProjects ? "Upload a PDF drawing set or create the sample package to start the AutoQC workflow." : "Upload a PDF drawing set, create the sample package, or show generated validation projects."}</small>
           </div>
         ) : (
           projects.map((project) => {
@@ -3480,7 +4067,7 @@ function ProjectsPanel({
 
             return (
               <div
-                className={`project-item ${project.id === selectedProjectId ? "selected" : ""}`}
+                className={`project-item ${project.id === selectedProjectId ? "selected" : ""} ${project.project_type === "validation" ? "validation-project" : ""}`}
                 key={project.id}
               >
                 <button
@@ -3493,6 +4080,7 @@ function ProjectsPanel({
                   <span className="project-name">{project.name}</span>
                   <span className="project-meta">
                     {formatStatus(project.status)}
+                    {project.project_type === "validation" ? <span>Validation</span> : null}
                     <span>{project.sheet_count ?? 0} sheets</span>
                     <span>{project.finding_count ?? project.findings_count ?? 0} AI findings</span>
                   </span>
@@ -5387,8 +5975,9 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
       effectiveStatuses.includes(finding.status) &&
       (finding.status === "needs_manual_placement" || finding.placement_status === "manual_placement_needed"),
   ).length;
+  const reviewerNameIssue = exportMode === "final" ? finalReviewerNameIssue(reviewerName) : null;
   const finalBlockerText = finalExportBlockerSummary(reviewCoverage, effectiveFindingCount, finalManualPlacementCount);
-  const finalReady = exportMode !== "final" || (finalCoverageReady && finalManualPlacementCount === 0 && finalConfirmed);
+  const finalReady = exportMode !== "final" || (finalCoverageReady && finalManualPlacementCount === 0 && finalConfirmed && !reviewerNameIssue);
   const exportDisabled = !project || effectiveStatuses.length === 0 || effectiveFindingCount === 0 || exporting || !finalReady;
   const exportTitle = !project
     ? "Select a project before exporting"
@@ -5396,9 +5985,14 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
       ? "Choose at least one finding status to export"
       : effectiveFindingCount === 0
         ? "No findings match the selected export statuses"
+        : reviewerNameIssue
+          ? reviewerNameIssue
         : exportMode === "final" && !finalReady
           ? "Complete the final export readiness checklist first"
         : "Generate marked PDF, logs, and summaries for the selected finding statuses";
+  const markedPdfHref = resolveAssetUrl(result?.marked_pdf);
+  const qaReportHref = resolveAssetUrl(result?.qa_report ?? result?.csv_log);
+  const htmlSummaryHref = resolveAssetUrl(result?.html_summary);
 
   return (
     <section className="panel export-panel">
@@ -5430,6 +6024,20 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
         >
           Final
         </button>
+      </div>
+
+      <div className={`export-mode-explanation mode-${exportMode}`} role="status">
+        {exportMode === "final" ? (
+          <>
+            <strong>Final package controls are strict.</strong>
+            <span>Final exports include accepted findings only, require complete imported review coverage, block manual-placement findings, and record reviewer signoff.</span>
+          </>
+        ) : (
+          <>
+            <strong>Draft package for working review.</strong>
+            <span>Draft exports can include selected statuses for coordination. They are not a final engineering signoff package.</span>
+          </>
+        )}
       </div>
 
       <div className="export-counts">
@@ -5467,8 +6075,9 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
           </details>
           <label className="field-label">
             Reviewer
-            <input value={reviewerName} onChange={(event) => setReviewerName(event.target.value)} placeholder="Local reviewer" />
+            <input value={reviewerName} onChange={(event) => setReviewerName(event.target.value)} placeholder="Responsible reviewer name" />
           </label>
+          {reviewerNameIssue ? <div className="inline-warning compact-error" role="alert">{reviewerNameIssue}</div> : null}
           <label className="checkbox-row">
             <input type="checkbox" checked={finalConfirmed} onChange={(event) => setFinalConfirmed(event.target.checked)} />
             <span>Confirm final export signoff</span>
@@ -5500,6 +6109,13 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
       </button>
 
       {error ? <div className="inline-error" role="alert">{error}</div> : null}
+
+      {result ? (
+        <div className={`export-result-summary validation-${statusClass(result.validation?.status ?? "not_reported")}`} role="status">
+          <strong>{exportResultTitle(result)}</strong>
+          <span>{exportResultExplanation(result)}</span>
+        </div>
+      ) : null}
 
       {result?.placement_summary ? (
         <div className="export-placement-summary" role="status">
@@ -5533,10 +6149,33 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
         </div>
       ) : null}
 
+      {result ? (
+        <div className="export-result-actions" aria-label="Generated report shortcuts">
+          {markedPdfHref ? (
+            <a href={markedPdfHref} target="_blank" rel="noreferrer" download title="Open or download the marked PDF">
+              <FileText size={15} />
+              Marked PDF
+            </a>
+          ) : null}
+          {qaReportHref ? (
+            <a href={qaReportHref} target="_blank" rel="noreferrer" title="Open the QA report or CSV log">
+              <FileText size={15} />
+              QA report
+            </a>
+          ) : null}
+          {htmlSummaryHref ? (
+            <a href={htmlSummaryHref} target="_blank" rel="noreferrer" title="Open the HTML review summary">
+              <ExternalLink size={15} />
+              HTML summary
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+
       {result?.marked_pdf ? (
         <a
           className="download-pdf-button"
-          href={resolveAssetUrl(result.marked_pdf) ?? result.marked_pdf}
+          href={markedPdfHref ?? result.marked_pdf}
           download
           target="_blank"
           rel="noreferrer"

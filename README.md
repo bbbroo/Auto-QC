@@ -2,7 +2,7 @@
 
 AutoQC is a local-first review workflow app for natural gas drawing packages. It uploads and processes PDF drawing sets, extracts sheet/page context, generates a copy/paste Chat Prompt for ChatGPT or Copilot Chat, imports AI-generated drawing update JSON, converts those updates into review findings, and exports a marked PDF plus structured review files.
 
-AutoQC is currently designed as an **AI-only review item workflow**. The app does not create its own rule-based QC comments for the user to review. PDF extraction, sheet metadata, page images, and entity extraction are used to support prompting, review organization, and markup export. The review items shown in the app should come from AI-generated updates imported through the manual Chat Prompt workflow or direct AI review workflow.
+AutoQC is currently designed as an **AI-only review item workflow**. The app does not create its own rule-based QC comments for the user to review. PDF extraction, sheet metadata, page images, and entity extraction are used to support prompting, review organization, and markup export. The review items shown in the app should come from AI-generated updates imported through the manual Chat Prompt workflow; Direct AI remains an experimental text-context-only lab path unless upgraded to true PDF/image review.
 
 AutoQC is not a sealed engineering authority. It is a markup and workflow aid. Final issue judgment remains with the responsible reviewer/engineer.
 
@@ -22,6 +22,7 @@ AutoQC is not a sealed engineering authority. It is a markup and workflow aid. F
 - AI prompt template/version manager and import batch history
 - Robust AI response import for common ChatGPT/Copilot JSON issues
 - Explicit AI JSON schema/parser mode reporting for common wrapper shapes
+- Second-pass missed-issue audit prompts with import-batch lineage and yield metadata
 - Editable finding review workflow with expanded reviewer statuses
 - Duplicate/merge tools that preserve original AI evidence and hide duplicates from normal exports
 - Markup placement status for exact, fuzzy, page-level, and manual-placement cases
@@ -32,6 +33,7 @@ AutoQC is not a sealed engineering authority. It is a markup and workflow aid. F
 - Marked PDF, QA register CSV, XLSX, JSON, HTML, and Markdown summary exports
 - Marked PDF export validation by reopening generated PDFs with PyMuPDF
 - Synthetic sample PDF and backend regression tests
+- Gold corpus evaluator for recall, precision, reviewer disposition, placement, and missed-audit yield metrics
 
 ## Current Product Workflow
 
@@ -45,6 +47,7 @@ Upload PDF drawing package
 -> Paste the update JSON into AutoQC
 -> Preview AI Updates
 -> Import Valid Updates
+-> Run optional second-pass missed-issue audit prompt and import linked audit JSON
 -> Review, edit, accept, reject, defer, or escalate findings
 -> Check placement status
 -> Export marked PDF and QA report
@@ -157,9 +160,10 @@ Auto-advance can be toggled in the findings panel. When enabled, accepting or re
 11. Click `Preview AI Updates`.
 12. Review parsed updates, warnings, repairs, duplicates, and create/update actions.
 13. Click `Import Valid Updates`.
-14. Review, edit, accept, reject, mark duplicate, merge, defer, or escalate the imported AI findings.
-15. Check placement status after export.
-16. Export the marked PDF and QA report.
+14. If AutoQC recommends a second-pass missed-issue audit, copy/use that prompt in the same ChatGPT/Copilot chat with the same PDF attached, then import the second JSON. AutoQC links that import to the prior batch and records audit yield.
+15. Review, edit, accept, reject, mark duplicate, merge, defer, or escalate the imported AI findings.
+16. Check placement status after export.
+17. Export the marked PDF and QA report.
 
 The app shows a success message such as:
 
@@ -183,6 +187,7 @@ Pasted ChatGPT/Copilot output is previewed before it becomes findings. The previ
 - exact duplicates, likely duplicates, same-page/similar-target updates, and same-page/same-title updates
 - whether each update will create a new finding or update an existing stable-ID match
 - normalized page number, target text, required update, rationale, category, severity, and confidence
+- review modality, plus missed-issue audit lineage and yield when the response is a second-pass audit
 
 If zero updates are importable, AutoQC can still preview the response. Import is blocked unless review coverage is complete, or it records a clean-page confirmation when the AI reviewed every expected page and found no updates.
 Updates with missing or blank `target_text` are rejected during preview with a user-facing reason. AutoQC only imports updates that cite usable drawing text anchors, so it does not create confusing page-only findings from vague AI output.
@@ -295,7 +300,9 @@ The app still exposes intentionally lighter focused or smoke-test templates, but
 
 Generated prompts include the hard no-triage rule, the incomplete-review rule, the required `autoqc-ai-updates-v1` JSON schema, and an AI response self-check section. If ChatGPT/Copilot cannot complete the full sheet-by-sheet review, the prompt tells it to return the incomplete-review JSON error instead of partial findings. The attached PDF remains the drawing source of truth; sheet index, parser output, OCR status, and UNKNOWN metadata are navigation only and must not become drawing updates.
 
-Each AI import preview/import creates an import batch record with source type, prompt/template version, AI tool/provider/model provenance when known, exact raw pasted response stored server-side, parser mode/schema version, parser warnings/repairs, candidate/valid/skipped counts, created/updated/duplicate counts, coverage summary, and import status. Normal UI/API batch lists expose only a raw-response stored flag, character count, and SHA-256 hash, not the full pasted response. The Import Quality Report shows parsed/importable/imported/skipped counts, duplicate count, missing page/target counts, exact/fuzzy/page-level/manual-placement counts, low-confidence count, and warnings/errors. The UI shows recent AI import batches for the selected project and can remove findings created by a selected imported batch after confirmation.
+Each AI import preview/import creates an import batch record with source type, prompt/template version, AI tool/provider/model provenance when known, `review_modality`, exact raw pasted response stored server-side, parser mode/schema version, parser warnings/repairs, candidate/valid/skipped counts, created/updated/duplicate counts, coverage summary, and import status. Normal UI/API batch lists expose only a raw-response stored flag, character count, and SHA-256 hash, not the full pasted response. The Import Quality Report shows parsed/importable/imported/skipped counts, duplicate count, missing page/target counts, exact/fuzzy/page-level/manual-placement counts, low-confidence count, and warnings/errors. The UI shows recent AI import batches for the selected project and can remove findings created by a selected imported batch after confirmation.
+
+Review modalities are explicit in batch metadata: `manual_pdf_attached_external` for the primary ChatGPT/Copilot path, `text_context_only` for the experimental Direct AI lab path, and reserved `pdf_image_direct` for a future direct PDF/image-capable review. Second-pass missed-issue audit imports store `audit_of_batch_id`, `audit_round`, and `audit_yield_count`.
 
 The findings panel includes a Finding Quality/Placement dashboard for exact placed, fuzzy placed, page-level, manual placement needed, low confidence, accepted, needs review, and duplicate/merged groups. These groups organize imported AI findings; they do not create findings.
 
@@ -334,7 +341,7 @@ $env:AUTOQC_AI_API_KEY = "your-key"
 $env:AUTOQC_AI_BASE_URL = "https://api.openai.com/v1/chat/completions"
 ```
 
-This path is optional and experimental. Direct AI Review currently sends extracted text/context only, is labeled `direct_review_mode: text_context_only`, and is not equivalent to the manual Chat Prompt workflow where the actual PDF is attached to ChatGPT/Copilot. It uses the same preview/import coverage and quality gates. If `AUTOQC_AI_MAX_SHEETS` caps the submitted sheets, the result is treated as a partial batch over the sent pages and cannot complete whole-package coverage by itself.
+This path is optional and experimental. Direct AI Review currently sends extracted text/context only, is labeled `direct_review_mode: text_context_only` / `review_modality: text_context_only`, and is not equivalent to the manual Chat Prompt workflow where the actual PDF is attached to ChatGPT/Copilot. It uses the same preview/import coverage and quality gates. If `AUTOQC_AI_MAX_SHEETS` caps the submitted sheets, the result is treated as a partial batch over the sent pages and cannot complete whole-package coverage by itself.
 
 The optional direct API path is separate from the manual Chat Prompt workflow and may send extracted sheet text to the configured AI endpoint. The manual Chat Prompt workflow intentionally requires the uploaded PDF and does not dump sheet body text into the prompt.
 
@@ -481,6 +488,18 @@ Each validation script writes a JSON and Markdown report under `data/validation_
 
 `regression_real_pdfs.py` uses PDFs under `examples/` when present and checks workflow mechanics only: upload/extraction, images, source PDF endpoint, prompt scope, coverage gates, representative AI JSON import, placement recalculation, draft export, final export readiness/signoff behavior, and PDF reopen validation. It does not assert engineering finding conclusions.
 
+Smoke, stress, and real-PDF regression projects are marked as generated validation projects. The normal project library hides them by default; enable `Show generated validation projects` to inspect them, use `Tag old validation runs` to backfill historical generated projects by known validation names, or use `Clean validation runs` to remove those generated local records.
+
+The Sheet Evidence Builder full example validation is recorded in `docs/sheet_evidence_builder.md`; the latest run processed both example PDFs at 220/220 page coverage with 22 enhanced prompt batches and no failed pages.
+
+For engineering usefulness evaluation, start a private `autoqc-gold-corpus-v2` corpus from `samples/evaluation/gold_corpus_template.json` and run:
+
+```powershell
+python scripts/evaluate_gold_corpus.py samples/evaluation/gold_corpus_template.json
+```
+
+The evaluator reports recall, precision, severity/category accuracy, known false positives, reviewer disposition counts, placement accuracy, manual-placement burden, declared missed issues, and second-pass audit yield.
+
 ## Current Engineering Review Limits
 
 AutoQC helps create, organize, review, and export drawing comments. It does not prove the engineering correctness of AI-generated findings.
@@ -501,6 +520,9 @@ Human review is still required for:
 - [Architecture](docs/ARCHITECTURE.md)
 - [Rule Engine](docs/RULES.md)
 - [Sample Scenarios](docs/SAMPLE_SCENARIOS.md)
+- [Sheet Evidence Builder](docs/sheet_evidence_builder.md)
+- [Engineering Evaluation](docs/engineering-evaluation.md)
+- [Company Pilot Operating Model](docs/company-pilot-operating-model.md)
 
 Some docs may still describe the earlier deterministic rule engine. The current product direction is AI-only for user-facing review findings.
 

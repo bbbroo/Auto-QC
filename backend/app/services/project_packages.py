@@ -404,8 +404,8 @@ class ProjectPackageService:
                 raise ValueError("A project with this ID already exists. Import was remapped, but the remapped ID also collided.")
             conn.execute(
                 """
-                INSERT INTO projects (id, name, source_pdf_path, status, summary, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO projects (id, name, source_pdf_path, status, summary, project_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project["id"],
@@ -413,6 +413,7 @@ class ProjectPackageService:
                     project.get("source_pdf_path"),
                     project.get("status") or "ready",
                     project.get("summary"),
+                    project.get("project_type") or "review",
                     project.get("created_at") or now,
                     now,
                 ),

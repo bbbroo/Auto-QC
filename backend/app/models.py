@@ -97,6 +97,7 @@ class ProjectRecord(BaseModel):
     source_pdf_path: str | None = None
     status: str = ReviewStatus.NEW.value
     summary: str | None = None
+    project_type: str = "review"
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
     sheet_count: int = 0
@@ -239,6 +240,9 @@ class ManualAIPreviewRequest(BaseModel):
     source_type: str = "manual_chat_prompt"
     prompt_version: str | None = None
     prompt_id: str | None = None
+    review_modality: str | None = None
+    audit_of_batch_id: str | None = None
+    audit_round: int | None = Field(default=None, ge=1)
 
 
 class ManualAIImportRequest(BaseModel):
@@ -247,6 +251,9 @@ class ManualAIImportRequest(BaseModel):
     source_type: str = "manual_chat_prompt"
     prompt_version: str | None = None
     prompt_id: str | None = None
+    review_modality: str | None = None
+    audit_of_batch_id: str | None = None
+    audit_round: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def response_or_preview_required(self) -> "ManualAIImportRequest":

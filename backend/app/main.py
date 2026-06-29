@@ -85,8 +85,8 @@ def data_asset(file_path: str) -> FileResponse:
 
 
 @app.get("/projects")
-def list_projects() -> list[dict[str, Any]]:
-    return [_enrich_project(project) for project in db.list_projects()]
+def list_projects(include_validation: bool = False) -> list[dict[str, Any]]:
+    return [_enrich_project(project) for project in db.list_projects(include_validation=include_validation)]
 
 
 @app.post("/projects")
@@ -94,8 +94,9 @@ async def create_project(
     name: str = Form(...),
     file: UploadFile | None = File(None),
     auto_review: bool = Form(True),
+    project_type: str = Form("review"),
 ) -> dict[str, Any]:
-    project = db.create_project(name=name)
+    project = db.create_project(name=name, project_type=project_type)
     if file is not None:
         try:
             content = await file.read()
@@ -114,6 +115,34 @@ async def create_project(
             db.update_project(project["id"], status="failed", summary=message)
             raise HTTPException(status_code=422, detail=message) from exc
     return get_project(project["id"])
+
+
+@app.delete("/maintenance/validation-projects")
+def delete_validation_projects() -> dict[str, Any]:
+    project_ids = db.list_validation_project_ids()
+    deleted: list[str] = []
+    errors: list[dict[str, str]] = []
+    for project_id in project_ids:
+        try:
+            project = db.get_project(project_id)
+            project_dir = _safe_project_dir_for_delete(project_id, project)
+            db.delete_project(project_id)
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+            deleted.append(project_id)
+        except Exception as exc:
+            errors.append({"project_id": project_id, "error": str(exc)})
+    return {
+        "deleted_count": len(deleted),
+        "deleted_project_ids": deleted,
+        "errors": errors,
+        "remaining_by_type": db.count_projects_by_type(),
+    }
+
+
+@app.post("/maintenance/validation-projects/tag-generated")
+def tag_generated_validation_projects(dry_run: bool = True) -> dict[str, Any]:
+    return db.tag_generated_validation_projects(dry_run=dry_run)
 
 
 @app.post("/sample-project")
@@ -469,6 +498,9 @@ def import_manual_ai_response(project_id: str, request: ManualAIImportRequest) -
                 source_type=request.source_type,
                 prompt_version=request.prompt_version,
                 prompt_id=request.prompt_id,
+                review_modality=request.review_modality,
+                audit_of_batch_id=request.audit_of_batch_id,
+                audit_round=request.audit_round,
             )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Project not found") from exc
@@ -487,6 +519,9 @@ def preview_manual_ai_response(project_id: str, request: ManualAIPreviewRequest)
             source_type=request.source_type,
             prompt_version=request.prompt_version,
             prompt_id=request.prompt_id,
+            review_modality=request.review_modality,
+            audit_of_batch_id=request.audit_of_batch_id,
+            audit_round=request.audit_round,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Project not found") from exc
@@ -781,6 +816,7 @@ def source_pdf(project_id: str) -> FileResponse:
 
 def _enrich_project(project: dict[str, Any]) -> dict[str, Any]:
     project = dict(project)
+    project["project_type"] = project.get("project_type") or "review"
     source = project.get("source_pdf_path")
     project["source_pdf_url"] = f"/projects/{project['id']}/source-pdf" if source else None
     try:

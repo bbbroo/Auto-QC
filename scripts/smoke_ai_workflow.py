@@ -53,7 +53,7 @@ def main() -> None:
     create_smoke_pdf(smoke_pdf)
 
     processor = PDFProcessor(db, settings)
-    project = db.create_project("Smoke AI Workflow")
+    project = db.create_project("Smoke AI Workflow", project_type="validation")
     processor.save_uploaded_pdf(project["id"], smoke_pdf.name, smoke_pdf.read_bytes())
     processed = processor.process_project(project["id"])
     assert len(processed["sheets"]) == 2

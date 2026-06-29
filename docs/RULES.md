@@ -4,6 +4,8 @@ The active UI review workflow is AI-only. Uploading a drawing package and runnin
 
 AI review items come from `backend/app/services/ai_review.py`. The primary workflow is the manual prompt bridge: generate a Chat Prompt, attach the drawing package in ChatGPT or Copilot Chat, preview the returned JSON, then import valid updates. The optional configured AI provider path is separate. Imported updates are normalized into `source="ai"` findings, default to `needs_review`, and are the only findings listed, edited, deleted, or exported by the active UI/API.
 
+Manual imports record `review_modality: manual_pdf_attached_external`. Second-pass missed-issue audit imports are still AI-imported findings, but their import batches also record `audit_of_batch_id`, `audit_round`, and `audit_yield_count` so recall-audit yield can be measured separately from first-pass review.
+
 The deterministic rule engine remains in the repository as internal/testable legacy code. It is useful for regression coverage of extraction, station-graph reasoning, stable IDs, evidence records, deduplication, confidence handling, and legacy rule behavior. It should not be described as the source of active user-facing review items.
 
 ## Legacy Review Modules
@@ -52,7 +54,7 @@ Expanded reviewer statuses are:
 
 Draft exports include selected statuses, use draft-labeled filenames/summaries, and always filter to `source="ai"`. Final exports are stricter: accepted findings only, complete review coverage required, reviewer signoff required, no manual-placement blockers, and generated PDF validation must pass or have warnings explicitly acknowledged. The pilot workflow does not support a final-export coverage override.
 
-Direct AI Review is optional and experimental. It is text-context-only unless upgraded to true PDF/image review. If the direct path is capped by `AUTOQC_AI_MAX_SHEETS`, imported coverage is scoped to only the sent pages and cannot complete a whole-package review by itself.
+Direct AI Review is optional and experimental. It is text-context-only unless upgraded to true PDF/image review, and records `review_modality: text_context_only`. If the direct path is capped by `AUTOQC_AI_MAX_SHEETS`, imported coverage is scoped to only the sent pages and cannot complete a whole-package review by itself.
 
 ## Placement Statuses
 

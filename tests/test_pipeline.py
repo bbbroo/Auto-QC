@@ -1032,6 +1032,63 @@ def test_manual_placement_endpoint_updates_existing_finding_without_creating_fin
     assert any(event["action"] == "manual_placement_saved" for event in main.db.list_finding_events(project["id"]))
 
 
+def test_validation_projects_are_hidden_by_default_and_cleanup_is_scoped(tmp_path: Path, monkeypatch) -> None:
+    import importlib
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("AUTOQC_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("AUTOQC_DB_PATH", str(tmp_path / "data" / "autoqc.sqlite"))
+    sys.modules.pop("backend.app.main", None)
+    sys.modules.pop("backend.app.config", None)
+
+    main = importlib.import_module("backend.app.main")
+    client = TestClient(main.app)
+    reviewer_project = client.post("/projects", data={"name": "Reviewer Package"}).json()
+    validation_project = client.post(
+        "/projects",
+        data={"name": "Smoke AI Workflow", "project_type": "validation"},
+    ).json()
+    legacy_generated_project = client.post("/projects", data={"name": "Large Wide Stress Fixture"}).json()
+    validation_dir = Path(main.settings.data_dir) / "projects" / validation_project["id"]
+    validation_dir.mkdir(parents=True)
+    (validation_dir / "generated.txt").write_text("validation artifact", encoding="utf-8")
+
+    default_projects = client.get("/projects").json()
+    assert {project["id"] for project in default_projects} == {reviewer_project["id"], legacy_generated_project["id"]}
+
+    dry_run = client.post("/maintenance/validation-projects/tag-generated?dry_run=true")
+    assert dry_run.status_code == 200
+    assert dry_run.json()["matched_project_ids"] == [legacy_generated_project["id"]]
+    assert client.get(f"/projects/{legacy_generated_project['id']}").json()["project_type"] == "review"
+
+    tagged = client.post("/maintenance/validation-projects/tag-generated?dry_run=false")
+    assert tagged.status_code == 200
+    assert tagged.json()["tagged_count"] == 1
+    assert tagged.json()["matched_project_ids"] == [legacy_generated_project["id"]]
+
+    default_projects = client.get("/projects").json()
+    assert [project["id"] for project in default_projects] == [reviewer_project["id"]]
+    assert default_projects[0]["project_type"] == "review"
+
+    all_projects = client.get("/projects?include_validation=true").json()
+    assert {project["id"] for project in all_projects} == {reviewer_project["id"], validation_project["id"], legacy_generated_project["id"]}
+    assert next(project for project in all_projects if project["id"] == validation_project["id"])["project_type"] == "validation"
+    assert next(project for project in all_projects if project["id"] == legacy_generated_project["id"])["project_type"] == "validation"
+
+    cleanup = client.delete("/maintenance/validation-projects")
+    assert cleanup.status_code == 200
+    payload = cleanup.json()
+    assert payload["deleted_count"] == 2
+    assert validation_project["id"] in payload["deleted_project_ids"]
+    assert legacy_generated_project["id"] in payload["deleted_project_ids"]
+    assert not validation_dir.exists()
+    assert client.get(f"/projects/{reviewer_project['id']}").status_code == 200
+    assert client.get(f"/projects/{validation_project['id']}").status_code == 404
+    assert client.get(f"/projects/{legacy_generated_project['id']}").status_code == 404
+
+
 def test_manual_placement_endpoint_converts_rotated_display_rect_to_pdf_coordinates(tmp_path: Path, monkeypatch) -> None:
     import importlib
     import sys
@@ -1855,7 +1912,9 @@ def test_ai_preview_confirm_import_prompt_metadata_and_batch_history(tmp_path: P
     assert "INCOMPLETE REVIEW RULE" in prompt
     assert "sheet_index" in prompt
     assert '"text":' not in prompt
+    assert "# AutoQC Enhanced Manual Review Prompt Batch" not in prompt
     assert "INSTALL 12 Inlet Valve" not in prompt
+    assert "included_sheet_evidence_context" in prompt
 
     ai_response = json.dumps(
         {
@@ -3493,8 +3552,10 @@ def test_direct_ai_review_is_text_context_only_and_cannot_bypass_coverage(tmp_pa
     )
     result = AIReviewService(db, settings, client=CompleteFakeAI()).review_project(project["id"])
     assert result["direct_review_mode"] == "text_context_only"
+    assert result["review_modality"] == "text_context_only"
     batch = db.get_ai_import_batch(result["batch"]["id"], project_id=project["id"])
     assert batch["metadata"]["direct_review_mode"] == "text_context_only"
+    assert batch["metadata"]["review_modality"] == "text_context_only"
     assert batch["metadata"]["ai_tool"] == "direct_ai_review"
     assert batch["metadata"]["ai_provider"]
     assert batch["metadata"]["warnings"]
@@ -3913,6 +3974,79 @@ def test_validation_report_writer_creates_json_and_markdown_with_redacted_paths(
     markdown_report = Path(report["markdown"]).read_text(encoding="utf-8")
     assert json_report["artifacts"]["marked_pdf"] == "projects/project-1/exports/marked.pdf"
     assert "PASS: example_check" in markdown_report
+
+
+def test_gold_corpus_evaluator_reports_review_quality_metrics(tmp_path: Path) -> None:
+    from scripts.evaluate_gold_corpus import evaluate_corpus
+
+    corpus = {
+        "schema_version": "autoqc-gold-corpus-v2",
+        "cases": [
+            {
+                "case_id": "case-1",
+                "expected_findings": [
+                    {
+                        "page_number": 1,
+                        "target_text": "CONTINTUED",
+                        "severity": "Minor",
+                        "category": "drafting quality",
+                        "expected_placement_status": "exact_target_found",
+                    },
+                    {"page_number": 2, "target_text": "MISSING OPP", "severity": "Major", "category": "overpressure protection"},
+                ],
+                "known_false_positives": [{"page_number": 3, "target_text": "GENERAL NOTES"}],
+                "missed_findings": [{"page_number": 4, "target_text": "UNRESOLVED DETAIL"}],
+                "actual_findings": [
+                    {
+                        "page_number": 1,
+                        "target_text": "CONTINTUED",
+                        "severity": "Minor",
+                        "category": "drafting quality",
+                        "placement_status": "exact_target_found",
+                        "reviewer_disposition": "accepted",
+                        "source_type": "manual_chat_prompt",
+                    },
+                    {
+                        "page_number": 3,
+                        "target_text": "GENERAL NOTES",
+                        "severity": "Note",
+                        "category": "drafting quality",
+                        "placement_status": "manual_placement_needed",
+                        "reviewer_disposition": "rejected",
+                        "source_type": "manual_chat_prompt",
+                    },
+                    {
+                        "page_number": 4,
+                        "target_text": "UNRESOLVED DETAIL",
+                        "severity": "Minor",
+                        "category": "drawing coordination",
+                        "placement_status": "page_level_fallback",
+                        "reviewer_disposition": "needs_manual_placement",
+                        "source_type": "missed_issue_audit",
+                        "audit_of_batch_id": "batch-1",
+                    },
+                ],
+            }
+        ]
+    }
+    corpus_path = tmp_path / "gold.json"
+    corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
+
+    report = evaluate_corpus(corpus_path)
+
+    assert report["case_count"] == 1
+    assert report["expected_total"] == 2
+    assert report["matched_total"] == 1
+    assert report["missed_total"] == 1
+    assert report["declared_missed_issue_total"] == 1
+    assert report["known_false_positive_total"] == 1
+    assert report["recall"] == 0.5
+    assert report["precision"] == 0.3333
+    assert report["placement_accuracy"] == 1.0
+    assert report["reviewer_disposition_totals"]["accepted"] == 1
+    assert report["reviewer_disposition_totals"]["rejected"] == 1
+    assert report["manual_placement_burden_total"] == 2
+    assert report["second_pass_audit_yield_total"] == 1
 
 
 def test_import_batch_rollback_removes_only_findings_created_by_that_batch(tmp_path: Path) -> None:

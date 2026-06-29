@@ -27,24 +27,40 @@ Your job is to identify drawing updates needed. Do not write finished PDF markup
 
 Required response schema:
 {
+  "schema_version": "autoqc-ai-updates-v1",
+  "reviewed_pages": [
+    {
+      "page_number": 1,
+      "review_status": "complete",
+      "issue_count": 1,
+      "notes": "optional short note"
+    }
+  ],
   "updates": [
     {
       "page_number": 1,
       "target_text": "exact visible text or concise visible target copied from the PDF",
       "issue": "clear description of the drawing issue",
-      "recommended_update": "specific update needed",
-      "reason": "why this update is needed based on visible PDF evidence",
-      "confidence": "high|medium|low"
+      "severity": "Critical|Major|Minor|Note",
+      "category": "tag consistency|line number consistency|drawing coordination|missing information|regulator station design|safety and operability|overpressure protection|instrumentation|drafting quality|title block and revision|BOM or count issue|notes and specifications|human review needed",
+      "required_update": "specific update needed",
+      "rationale": "why this update is needed based on visible PDF evidence",
+      "confidence": 0.85
     }
   ]
 }
 
 Rules:
+- Every response must use schema_version autoqc-ai-updates-v1.
+- reviewed_pages must include every page listed in this batch, even if no updates are found on that page.
+- Use review_status "complete" only when the attached PDF page was actually reviewed. Use "incomplete" or "not_readable" if the page could not be fully reviewed.
+- issue_count is the number of returned updates for that page.
 - Every update must have a page_number and target_text tied to visible PDF content.
+- Every update must have required_update, rationale, severity, category, and numeric confidence from 0.0 to 1.0.
 - Verify every issue visually against the attached PDF.
 - Do not assume extracted evidence is complete.
 - Do not invent tags, notes, dimensions, references, or drawing requirements that are not visible in the PDF.
-- If no visible actionable issues are found for this batch, return {"updates": []}.
+- If no visible actionable issues are found for this batch, return {"schema_version":"autoqc-ai-updates-v1","reviewed_pages":[...complete reviewed page objects for every batch page...],"updates":[]}.
 """
 
 
