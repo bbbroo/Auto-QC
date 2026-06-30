@@ -15,7 +15,7 @@
       "category": "drawing coordination",
       "target_text": "INLET ISOLATION VALVE V-101",
       "required_update": "Verify the inlet isolation valve tag is coordinated with the P&ID and revise if needed.",
-      "rationale": "The sample package uses an inlet isolation valve tag that should be checked against downstream sheets.",
+      "rationale": "The sample project uses an inlet isolation valve tag that should be checked against downstream sheets.",
       "confidence": 0.82
     },
     {

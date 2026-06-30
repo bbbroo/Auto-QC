@@ -391,7 +391,6 @@ class ExportService:
             if latest_import_metadata.get("direct_review_mode") == "text_context_only"
             else None
         )
-        checklist_progress = self.db.project_checklist_progress(project["id"])
         for finding in findings:
             severity_counts[finding["severity"]] = severity_counts.get(finding["severity"], 0) + 1
             category_counts[finding["category"]] = category_counts.get(finding["category"], 0) + 1
@@ -415,7 +414,6 @@ class ExportService:
             f"- Reviewer signoff: {signoff.get('reviewer_name')} at {signoff.get('timestamp') if export_mode == 'final' else 'not required for draft'}",
             f"- Direct AI warning: {direct_review_warning or 'none'}",
             f"- Import quality summary: {import_quality or 'No imported AI quality report available'}",
-            f"- Checklist completion: {checklist_progress or 'No project checklist selected'}",
             "",
             "## Exported Findings",
             "",

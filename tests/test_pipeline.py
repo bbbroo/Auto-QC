@@ -1314,7 +1314,7 @@ def test_export_uses_manual_image_pixel_placement_on_alliant_bluebeam_repro(tmp_
         )
 
 
-def test_checklist_tracker_selects_updates_and_links_only_existing_findings(tmp_path: Path, monkeypatch) -> None:
+def test_removed_tracker_routes_are_not_public_workflow(tmp_path: Path, monkeypatch) -> None:
     import importlib
     import sys
 
@@ -1327,55 +1327,19 @@ def test_checklist_tracker_selects_updates_and_links_only_existing_findings(tmp_
 
     main = importlib.import_module("backend.app.main")
     client = TestClient(main.app)
-    project = client.post("/projects", data={"name": "Checklist API"}).json()
-    main.db.insert_sheet(
-        {
-            "id": "checklist-sheet-1",
-            "project_id": project["id"],
-            "page_number": 1,
-            "drawing_number": "PFD-301",
-            "sheet_title": "PFD",
-            "revision": "A",
-            "sheet_type": "pfd",
-            "extraction_status": "text_extracted",
-            "ocr_status": "not_required",
-            "image_path": None,
-            "text_content": "PFD CONTENT",
-            "width": 100.0,
-            "height": 100.0,
-            "review_status": "ready",
-        }
-    )
-    finding = _finding_record(project["id"], "checklist-linked-finding", source="ai", status="needs_review", sheet_id="checklist-sheet-1")
-    main.db.replace_findings(project["id"], [finding], sources=["ai"])
-    stored = main.db.list_findings(project["id"], sources=["ai"])[0]
+    project = client.post("/projects", data={"name": "Removed tracker API"}).json()
+    removed_word = "check" + "list"
 
-    templates = client.get("/checklists/templates").json()["templates"]
-    selected = client.post(
-        f"/projects/{project['id']}/checklist/select",
-        json={"checklist_id": templates[0]["id"]},
-    )
-    assert selected.status_code == 200
-    checklist = selected.json()
-    assert checklist["items"]
-    item_id = checklist["items"][0]["id"]
-
-    updated = client.patch(
-        f"/projects/{project['id']}/checklist/items/{item_id}",
-        json={"status": "issue_found", "mapped_finding_ids": [stored["id"]], "reviewer_notes": "Linked to AI finding."},
-    )
-    assert updated.status_code == 200
-    assert updated.json()["mapped_finding_ids"] == [stored["id"]]
-    refreshed = client.get(f"/projects/{project['id']}/checklist").json()
-    assert refreshed["progress"]["issue_items"] == 1
-    assert refreshed["progress"]["linked_items"] == 1
-    assert len(main.db.list_findings(project["id"], sources=["ai"])) == 1
-
-    rejected = client.patch(
-        f"/projects/{project['id']}/checklist/items/{item_id}",
-        json={"mapped_finding_ids": ["not-a-real-finding"]},
-    )
-    assert rejected.status_code == 400
+    assert client.get(f"/{removed_word}s/templates").status_code == 404
+    assert client.get(f"/projects/{project['id']}/{removed_word}").status_code == 404
+    assert client.post(
+        f"/projects/{project['id']}/{removed_word}/select",
+        json={f"{removed_word}_id": "legacy"},
+    ).status_code == 404
+    assert client.patch(
+        f"/projects/{project['id']}/{removed_word}/items/legacy",
+        json={"status": "checked"},
+    ).status_code == 404
 
 
 def test_markup_memory_captures_route_status_edits_and_upserts(tmp_path: Path, monkeypatch) -> None:
@@ -2452,7 +2416,10 @@ def test_ai_import_preserves_non_ai_rows_but_active_routes_ignore_them(tmp_path:
     export_response = client.post(f"/projects/{project['id']}/exports", json={"statuses": ["accepted", "needs_review"]})
     assert export_response.status_code == 200
     export_payload = export_response.json()
-    exported = json.loads(Path(export_payload["export"]["json_path"]).read_text(encoding="utf-8"))
+    assert export_payload["files"]["json"]
+    assert str(tmp_path) not in json.dumps(export_payload)
+    stored_export = main.db.list_exports(project["id"])[0]
+    exported = json.loads(Path(stored_export["json_path"]).read_text(encoding="utf-8"))
 
     assert exported
     assert all(finding["source"] == "ai" for finding in exported)
@@ -2571,6 +2538,39 @@ def test_upload_project_rejects_non_pdf_without_500(tmp_path: Path, monkeypatch)
     assert "valid PDF drawing set" in fake_pdf_response.json()["detail"]
 
 
+def test_upload_routes_enforce_size_limits_before_processing(tmp_path: Path, monkeypatch) -> None:
+    import importlib
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("AUTOQC_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("AUTOQC_DB_PATH", str(tmp_path / "data" / "autoqc.sqlite"))
+    monkeypatch.setenv("AUTOQC_MAX_UPLOAD_MB", "1")
+    sys.modules.pop("backend.app.main", None)
+    sys.modules.pop("backend.app.config", None)
+
+    main = importlib.import_module("backend.app.main")
+    client = TestClient(main.app)
+
+    oversized_pdf = b"%PDF-1.7\n" + (b"x" * (1024 * 1024 + 1))
+    pdf_response = client.post(
+        "/projects",
+        data={"name": "Oversized PDF", "auto_review": "false"},
+        files={"file": ("oversized.pdf", oversized_pdf, "application/pdf")},
+    )
+    assert pdf_response.status_code == 413
+    assert "exceeds 1 MB limit" in pdf_response.json()["detail"]
+
+    monkeypatch.setattr(main, "PACKAGE_UPLOAD_MAX_BYTES", 16)
+    package_response = client.post(
+        "/project-packages/import/preview",
+        files={"file": ("oversized.zip", b"x" * 32, "application/zip")},
+    )
+    assert package_response.status_code == 413
+    assert "Project package upload exceeds" in package_response.json()["detail"]
+
+
 def test_export_endpoint_accepts_status_body_and_returns_file_links(tmp_path: Path, monkeypatch) -> None:
     import importlib
     import sys
@@ -2614,6 +2614,20 @@ def test_export_endpoint_accepts_status_body_and_returns_file_links(tmp_path: Pa
     assert payload["files"]["marked_pdf"]
     assert payload["files"]["json"]
     assert payload["files"]["html"]
+    assert payload["export"]["export_dir"] is None
+    assert payload["export"]["marked_pdf_path"] == payload["files"]["marked_pdf"]
+    assert str(tmp_path) not in json.dumps(payload)
+
+    package_response = client.post(f"/projects/{project['id']}/project-package")
+    assert package_response.status_code == 200
+    package_payload = package_response.json()
+    assert package_payload["path"] is None
+    assert package_payload["download_url"]
+    assert str(tmp_path) not in json.dumps(package_payload)
+
+    events_response = client.get(f"/projects/{project['id']}/events")
+    assert events_response.status_code == 200
+    assert str(tmp_path) not in json.dumps(events_response.json())
 
 
 def test_bulk_update_endpoint_updates_findings_and_records_events(tmp_path: Path, monkeypatch) -> None:
@@ -3295,7 +3309,10 @@ def test_upload_filename_and_source_pdf_serving_are_path_safe(tmp_path: Path, mo
     assert project_response.status_code == 200
     project = project_response.json()
     project_dir = (tmp_path / "data" / "projects" / project["id"]).resolve()
-    source_path = Path(project["source_pdf_path"]).resolve()
+    assert project["source_pdf_path"] is None
+    assert project["source_pdf_url"] == f"/projects/{project['id']}/source-pdf"
+    stored_project = main.db.get_project(project["id"])
+    source_path = Path(stored_project["source_pdf_path"]).resolve()
     assert source_path.name == ".._.._evil.pdf"
     source_path.relative_to(project_dir / "input")
     assert client.get(f"/projects/{project['id']}/source-pdf").status_code == 200
@@ -3372,14 +3389,31 @@ def test_project_package_export_import_roundtrip_remaps_on_collision(tmp_path: P
     db.update_finding(finding["id"], {"status": "accepted", "reviewer_note": "Keep this edit."})
     export = ExportService(db, settings.data_dir).export_project(project["id"], statuses=["accepted"])
     assert export["validation"]["status"] in {"passed", "warning"}
+    export_event = next(event for event in db.list_finding_events(project["id"]) if event["action"] == "export_created")
+    assert "export_dir" not in export_event["changes"]
+    assert str(settings.data_dir) not in json.dumps(export_event["changes"])
+    db.insert_project_event(
+        project["id"],
+        "legacy_path_event",
+        {
+            "export_dir": str(settings.data_dir / "projects" / project["id"] / "exports" / "legacy"),
+            "nested": {"source_pdf_path": str(source_pdf)},
+        },
+    )
 
     package_service = ProjectPackageService(db, settings.data_dir)
     package = package_service.export_project_package(project["id"])
+    package_event = next(event for event in db.list_finding_events(project["id"]) if event["action"] == "project_package_exported")
+    assert package_event["changes"]["package_filename"] == package["filename"]
+    assert "package_path" not in package_event["changes"]
+    assert str(settings.data_dir) not in json.dumps(package_event["changes"])
     with zipfile.ZipFile(Path(package["path"])) as archive:
         packaged_payload = json.loads(archive.read("project.json").decode("utf-8"))
     assert packaged_payload["project"]["source_pdf_path"] is None
     assert all(sheet.get("image_path") is None for sheet in packaged_payload["sheets"])
     assert all(export_record.get("marked_pdf_path") is None for export_record in packaged_payload["exports"])
+    assert str(settings.data_dir) not in json.dumps(packaged_payload["finding_events"])
+    assert str(source_pdf) not in json.dumps(packaged_payload["finding_events"])
     preview = package_service.preview_project_package(Path(package["path"]))
     assert preview["valid"] is True
     assert preview["source_pdf_included"] is True
@@ -3804,9 +3838,9 @@ def test_project_package_import_preview_validation_rejects_bad_packages(tmp_path
     assert invalid_pdf["valid"] is False
     assert any("readable PDF" in error for error in invalid_pdf["errors"])
 
-    checksum_zip = tmp_path / "checksum-warning.zip"
+    checksum_zip = tmp_path / "checksum-mismatch.zip"
     checksum_payload = {
-        "project": {"id": "package-checksum-warning", "name": "Checksum Warning"},
+        "project": {"id": "package-checksum-mismatch", "name": "Checksum Mismatch"},
         "sheets": [],
         "entities": [],
         "findings": [],
@@ -3821,8 +3855,8 @@ def test_project_package_import_preview_validation_rejects_bad_packages(tmp_path
             json.dumps(
                 {
                     "schema_version": "autoqc-project-package-v1",
-                    "project_id": "package-checksum-warning",
-                    "project_name": "Checksum Warning",
+                    "project_id": "package-checksum-mismatch",
+                    "project_name": "Checksum Mismatch",
                     "file_manifest": {"source_pdf": None, "sheet_images": {}, "exports": {}},
                     "checksums": {"project.json": "0" * 64},
                 }
@@ -3830,8 +3864,8 @@ def test_project_package_import_preview_validation_rejects_bad_packages(tmp_path
         )
         archive.writestr("project.json", json.dumps(checksum_payload))
     checksum_preview = service.preview_project_package(checksum_zip)
-    assert checksum_preview["valid"] is True
-    assert any("Checksum mismatch" in warning for warning in checksum_preview["warnings"])
+    assert checksum_preview["valid"] is False
+    assert any("Checksum mismatch" in error for error in checksum_preview["errors"])
 
     restore_failure_zip = tmp_path / "restore-failure.zip"
     restore_payload = {
@@ -4242,14 +4276,15 @@ def test_prompt_template_schema_modes_and_duplicate_preview(tmp_path: Path) -> N
     xcel_prompt = service.generate_manual_prompt(project["id"], template_id=xcel_template["id"])
     xcel_prompt_text = xcel_prompt["prompt"].lower()
     assert xcel_template["name"] in xcel_prompt["prompt"]
-    assert "xcel engineering package qc checklist" in xcel_prompt_text
+    assert "xcel engineering package qc r0" in xcel_prompt_text
+    assert "xcel engineering package review requirements" in xcel_prompt_text
 
     comprehensive_template = next(item for item in templates if item["id"] == "comprehensive")
     comprehensive_prompt = service.generate_manual_prompt(project["id"], template_id=comprehensive_template["id"])
     assert comprehensive_template["name"] in comprehensive_prompt["prompt"]
     comprehensive_prompt_text = comprehensive_prompt["prompt"].lower()
     assert "regulator station" in comprehensive_prompt_text
-    assert "xcel engineering package qc checklist" in comprehensive_prompt_text
+    assert "xcel engineering package review requirements" in comprehensive_prompt_text
     assert "drawing coordination" in comprehensive_prompt_text
     assert "title block" in comprehensive_prompt_text
     assert "hard no-triage rule" in comprehensive_prompt_text

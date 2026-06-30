@@ -443,64 +443,6 @@ export interface PromptTemplate {
   review_priorities?: string[];
 }
 
-export interface ChecklistTemplate {
-  id: string;
-  name: string;
-  version: string;
-  description?: string;
-  item_count?: number;
-}
-
-export type ChecklistStatus = "not_started" | "checked" | "issue_found" | "not_applicable" | "needs_human_review";
-
-export interface ChecklistItem {
-  id: string;
-  project_checklist_id: string;
-  project_id: string;
-  checklist_id: string;
-  checklist_name: string;
-  version: string;
-  section: string;
-  discipline?: string | null;
-  sheet_type?: string | null;
-  item_text: string;
-  applicability: string;
-  status: ChecklistStatus;
-  mapped_finding_ids: string[];
-  reviewer_notes?: string | null;
-  source_template_reference?: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ChecklistItemUpdate {
-  status?: ChecklistStatus;
-  applicability?: string;
-  mapped_finding_ids?: string[];
-  reviewer_notes?: string;
-}
-
-export interface ChecklistProgress {
-  total_items: number;
-  completed_items: number;
-  issue_items: number;
-  linked_items: number;
-  percent_complete: number;
-  by_status: Record<string, number>;
-}
-
-export interface ProjectChecklist {
-  id?: string;
-  project_id: string;
-  checklist_id?: string;
-  checklist_name?: string;
-  version?: string;
-  items: ChecklistItem[];
-  progress?: ChecklistProgress | null;
-  created_at?: string;
-  updated_at?: string;
-}
-
 export interface ReadinessCheck {
   name: string;
   ok: boolean;
@@ -519,7 +461,7 @@ export interface ReadinessResponse {
 export interface ProjectPackageExportResponse {
   package_id: string;
   project_id: string;
-  path: string;
+  path?: string | null;
   filename: string;
   download_url: string;
 }

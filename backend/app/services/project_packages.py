@@ -98,7 +98,7 @@ class ProjectPackageService:
         self.db.insert_project_event(
             project_id,
             "project_package_exported",
-            {"package_id": package_id, "package_path": str(package_path), "include_source_pdf": include_source_pdf},
+            {"package_id": package_id, "package_filename": package_path.name, "include_source_pdf": include_source_pdf},
         )
         return {
             "package_id": package_id,
@@ -218,7 +218,7 @@ class ProjectPackageService:
                                 source_pdf = (staging / source_ref).resolve()
                                 source_pdf_valid = _validate_pdf(source_pdf, errors, "source PDF")
                             _validate_package_images(staging, file_manifest, errors)
-                            _validate_checksums(staging, manifest, warnings)
+                            _validate_checksums(staging, manifest, errors, warnings)
         except zipfile.BadZipFile:
             errors.append("Uploaded AutoQC project package is not a readable zip archive.")
         except ValueError as exc:
@@ -558,7 +558,7 @@ class ProjectPackageService:
                         event.get("finding_id"),
                         event.get("stable_id"),
                         event.get("action"),
-                        json.dumps(event.get("changes") or {}, ensure_ascii=True),
+                        json.dumps(_sanitize_audit_changes(event.get("changes") or {}), ensure_ascii=True),
                         event.get("created_at") or now,
                     ),
                 )
@@ -606,6 +606,9 @@ def _strip_local_paths_from_payload(data: dict[str, Any]) -> None:
         export["export_dir"] = None
         for key in ["marked_pdf_path", "csv_path", "qa_report_path", "xlsx_path", "json_path", "summary_path", "html_path"]:
             export[key] = None
+    for event in data.get("finding_events") or []:
+        if isinstance(event, dict) and isinstance(event.get("changes"), dict):
+            event["changes"] = _sanitize_audit_changes(event["changes"])
 
 
 def _count_export_artifacts(file_manifest: dict[str, Any]) -> int:
@@ -615,6 +618,35 @@ def _count_export_artifacts(file_manifest: dict[str, Any]) -> int:
         if isinstance(export_files, dict):
             count += len([value for value in export_files.values() if isinstance(value, str) and value])
     return count
+
+
+def _sanitize_audit_changes(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(item, str) and (_looks_like_local_path_key(str(key)) or _looks_like_local_path(item)):
+                sanitized[key] = _redacted_path_label(item)
+            else:
+                sanitized[key] = _sanitize_audit_changes(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_audit_changes(item) for item in value]
+    return value
+
+
+def _looks_like_local_path_key(key: str) -> bool:
+    normalized = key.lower()
+    return normalized.endswith("_dir") or "path" in normalized or "directory" in normalized
+
+
+def _looks_like_local_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", value)) or value.startswith("\\\\") or bool(re.match(r"^/(Users|home|var|tmp|mnt)/", value))
+
+
+def _redacted_path_label(value: str) -> str:
+    parts = [part for part in re.split(r"[\\/]+", value) if part]
+    filename = parts[-1] if parts else ""
+    return f"[local path hidden: {filename}]" if filename else "[local path hidden]"
 
 
 def sha256_file(path: Path) -> str:
@@ -750,7 +782,7 @@ def _validate_package_images(staging: Path, file_manifest: dict[str, Any], error
             errors.append(f"Package image is not readable: {ref}: {exc}")
 
 
-def _validate_checksums(staging: Path, manifest: dict[str, Any], warnings: list[str]) -> None:
+def _validate_checksums(staging: Path, manifest: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
     checksums = manifest.get("checksums")
     if not isinstance(checksums, dict):
         warnings.append("Package manifest has no checksum block.")
@@ -762,14 +794,14 @@ def _validate_checksums(staging: Path, manifest: dict[str, Any], warnings: list[
         try:
             path.relative_to(staging.resolve())
         except ValueError:
-            warnings.append(f"Checksum entry points outside package: {ref}.")
+            errors.append(f"Checksum entry points outside package: {ref}.")
             continue
         if not path.is_file():
-            warnings.append(f"Checksum file missing from package: {ref}.")
+            errors.append(f"Checksum file missing from package: {ref}.")
             continue
         actual = sha256_file(path)
         if actual.lower() != expected.lower():
-            warnings.append(f"Checksum mismatch for {ref}.")
+            errors.append(f"Checksum mismatch for {ref}.")
 
 
 def safe_stem(name: str) -> str:

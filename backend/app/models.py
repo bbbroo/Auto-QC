@@ -283,17 +283,6 @@ class ManualPlacementRequest(BaseModel):
     source_height: float | None = None
 
 
-class ChecklistSelectRequest(BaseModel):
-    checklist_id: str
-
-
-class ChecklistItemUpdate(BaseModel):
-    status: Literal["not_started", "checked", "issue_found", "not_applicable", "needs_human_review"] | None = None
-    applicability: str | None = None
-    mapped_finding_ids: list[str] | None = None
-    reviewer_notes: str | None = None
-
-
 class ProjectPackageImportResponse(BaseModel):
     project: dict[str, Any]
     original_project_id: str

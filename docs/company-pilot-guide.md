@@ -1,6 +1,6 @@
-# AutoQC Company Pilot Checklist
+# AutoQC Company Pilot Guide
 
-Use this checklist before and during a company pilot. AutoQC is a local workflow aid for natural gas drawing QC tracking; final engineering judgment remains with the responsible reviewer.
+Use this guide before and during a company pilot. AutoQC is a local workflow aid for natural gas drawing QC tracking; final engineering judgment remains with the responsible reviewer.
 
 ## Local Setup
 
@@ -14,12 +14,12 @@ Use this checklist before and during a company pilot. AutoQC is a local workflow
 - Run `python scripts/doctor.py`.
 - For deeper validation, run `python scripts/doctor.py --full`.
 - Resolve failed checks for Python/backend health, database writability, data directory writability, source/export directories, and default port conflicts.
-- In the app, open `System Check` and confirm the same readiness items are visible to a coworker.
+- In the app, open Advanced, then open `System Check` and confirm the same readiness items are visible to a coworker.
 
 ## Sample Project Workflow
 
-- Click `Sample Package`.
-- Confirm sheets render and navigation works.
+- Open Advanced and click `Sample Project`.
+- Confirm sheets render and viewer sheet jumping works.
 - Generate a Chat Prompt using the default prompt template.
 - Import known-good AI JSON or use `python scripts/smoke_ai_workflow.py`.
 - Review, accept, reject, edit, and export at least one finding.
@@ -30,7 +30,7 @@ Use this checklist before and during a company pilot. AutoQC is a local workflow
 - Confirm extracted sheet count and sheet titles/drawing numbers are plausible.
 - Open the source PDF from AutoQC and confirm it is the same package used for review.
 
-## ChatGPT/Copilot Manual Bridge
+## ChatGPT/Copilot Manual AI Review
 
 - For production review, use the default Exhaustive Manual Review prompt or another exhaustive manual template.
 - Generate `Chat Prompt`.
@@ -82,11 +82,11 @@ Use this checklist before and during a company pilot. AutoQC is a local workflow
 
 ## Backup / Export Project Package Check
 
-- Click `Export Project Package`.
+- Open Advanced and click `Export Project Package`.
 - Save the generated `.zip`.
 - Import the package into a clean or existing AutoQC workspace.
 - Confirm IDs are remapped when the original project already exists.
-- Confirm sheets, imported AI findings, statuses/edits, import history, audit log, exports, source PDF copy, and generated reports are restored.
+- Confirm sheets, imported AI findings, statuses/edits, AI Import History, Audit Log, exports, source PDF copy, and generated reports are restored.
 - Confirm import preview warnings are reviewed before confirming restore.
 
 ## Known Limitations
@@ -95,7 +95,7 @@ Use this checklist before and during a company pilot. AutoQC is a local workflow
 - AI findings depend on the quality of the ChatGPT/Copilot response and the attached PDF.
 - The app cannot prove engineering correctness.
 - Manual placement may still be needed for missing/fuzzy target text.
-- Live Direct AI API behavior is optional, text-context-only, and separate from the manual bridge. If sheet sending is capped, it counts only the sent pages.
+- Live Direct AI API behavior is optional, text-context-only, and separate from the manual AI review workflow. If sheet sending is capped, it counts only the sent pages.
 
 ## Data / Privacy Notes
 

@@ -6,9 +6,6 @@ import type {
   AISettingsRequest,
   BatchRollbackPreview,
   BulkFindingResponse,
-  ChecklistItem,
-  ChecklistItemUpdate,
-  ChecklistTemplate,
   ExportRequest,
   ExportResponse,
   Finding,
@@ -24,7 +21,6 @@ import type {
   ManualReviewPlan,
   ManualReviewScope,
   PlacementRecalculateResponse,
-  ProjectChecklist,
   ProjectPackageExportResponse,
   ProjectPackageImportResponse,
   ProjectPackageImportPreview,
@@ -428,36 +424,6 @@ export async function saveManualPlacement(
     }),
   });
   return unwrapItem<Finding>(payload, "finding");
-}
-
-export async function listChecklistTemplates(): Promise<ChecklistTemplate[]> {
-  const payload = await request<unknown>("/checklists/templates");
-  return unwrapCollection<ChecklistTemplate>(payload, ["templates", "items"]);
-}
-
-export async function getProjectChecklist(projectId: string): Promise<ProjectChecklist> {
-  return request<ProjectChecklist>(`/projects/${encodeURIComponent(projectId)}/checklist`);
-}
-
-export async function selectProjectChecklist(projectId: string, checklistId: string): Promise<ProjectChecklist> {
-  return request<ProjectChecklist>(`/projects/${encodeURIComponent(projectId)}/checklist/select`, {
-    method: "POST",
-    body: JSON.stringify({ checklist_id: checklistId }),
-  });
-}
-
-export async function updateProjectChecklistItem(
-  projectId: string,
-  itemId: string,
-  update: ChecklistItemUpdate,
-): Promise<ChecklistItem> {
-  return request<ChecklistItem>(
-    `/projects/${encodeURIComponent(projectId)}/checklist/items/${encodeURIComponent(itemId)}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify(update),
-    },
-  );
 }
 
 export async function getMarkupMemorySettings(): Promise<MarkupMemorySettings> {

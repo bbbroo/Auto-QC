@@ -10,27 +10,24 @@ def test_frontend_main_workflow_smoke_contract() -> None:
     styles_source = Path("frontend/src/styles.css").read_text(encoding="utf-8")
 
     workflow_text = [
-        "Upload / sample package",
+        "Upload PDF",
         "Chat Prompt",
         "Paste AI update JSON",
         "Preview AI Updates",
         "Import Valid Updates",
+        "Current work",
         "AI QC Log",
         "Inspector",
-        "Review Package",
+        "Marked PDF",
         "Open Source PDF",
         "No AI findings imported yet",
         "Finding Focus",
         "Full Sheet",
-        "Marked PDF",
+        "Selected finding quick actions",
         "Manual markup placement",
         "Place on drawing",
-        "Finding Quality and Placement dashboard",
         "Import Quality Report",
-        "Checklist",
-        "Coverage Tracker",
-        "Select checklist for project",
-        "Checklist items track review coverage and link evidence/findings",
+        "Jump to sheet",
         "Export placement",
         "Exact target found",
         "Fuzzy target found",
@@ -38,12 +35,15 @@ def test_frontend_main_workflow_smoke_contract() -> None:
         "Manual placement needed",
         "Auto-advance",
         "left to review",
+        "Filters and bulk actions",
         "All placement",
         "Located",
         "Reviewer keyboard shortcuts",
+        "Manual AI Review",
         "Export Project Package",
         "Import Project Package",
         "Prompt template",
+        "Advanced prompt options",
         "System Check",
         "Audit Log",
         "How to use AutoQC",
@@ -74,6 +74,10 @@ def test_frontend_main_workflow_smoke_contract() -> None:
         "Why blocked?",
         "Advanced Features",
         "Experimental / Power User Tools",
+        "Power-user review tools",
+        "Direct AI Text Only",
+        "Sample Project",
+        "Backup / Restore",
         "Markup Memory",
         "Include Markup Memory in generated prompts",
         "Rebuild Memory From Existing Findings",
@@ -92,11 +96,13 @@ def test_frontend_main_workflow_smoke_contract() -> None:
         "Upload cautions",
         "AI response preflight",
         "Import blocked by coverage",
+        "Advanced export options",
         "Final package controls are strict.",
         "Draft package for working review.",
+        "Export Marked PDF",
         "Generated report shortcuts",
         "Replace the placeholder reviewer name",
-        "Text-only AI Lab",
+        "Undo",
     ]
     for text in workflow_text:
         assert text in app_source
@@ -118,6 +124,21 @@ def test_frontend_main_workflow_smoke_contract() -> None:
     assert "withRecoveryHint" in api_source
     assert "missed_issue_audit" in app_source
 
+    primary_nav_contract = [
+        'data-left-rail-card="projects"',
+        'data-left-rail-card="review"',
+        'data-left-rail-card="findings"',
+        'data-left-rail-card="export"',
+    ]
+    for nav_marker in primary_nav_contract:
+        assert nav_marker in app_source
+    assert 'role="tab"\n            aria-selected={leftRailCard === "sheets"' not in app_source
+    assert 'role="tab"\n            aria-selected={leftRailCard === "inspector"' not in app_source
+    removed_tracker_card = "check" + "list"
+    assert f'role="tab"\n            aria-selected={{leftRailCard === "{removed_tracker_card}"' not in app_source
+    assert ("Check" + "list") not in app_source
+    assert ("Coverage " + "Tracker") not in app_source
+
     resilient_ui_hooks = [
         "global-status-banner",
         "inline-warning",
@@ -127,6 +148,8 @@ def test_frontend_main_workflow_smoke_contract() -> None:
         "exportDisabled",
         "saveDisabled",
         "viewer-mode-toggle",
+        "viewer-selected-finding-bar",
+        "viewer-selected-finding-actions",
         "manual-placement-draft",
         "manual-placement-tools",
         "finding-overlay.selected",
@@ -135,17 +158,18 @@ def test_frontend_main_workflow_smoke_contract() -> None:
         "placementSummaryText",
         "review-queue-card",
         "shortcut-hints",
+        "finding-secondary-controls",
         "placement-filter",
         "matchesPlacementFilter",
         "nextUnreviewedFinding",
+        "status-undo-banner",
+        "current-work-summary",
         "dashboard-summary",
         "readiness-panel",
         "audit-log-panel",
         "export-validation",
         "modal-backdrop",
         "dedupe-tools",
-        "checklist-panel",
-        "checklist-progress",
         "advanced-features-panel",
         "memory-preview-text",
         "memory-stats-grid",
@@ -153,12 +177,21 @@ def test_frontend_main_workflow_smoke_contract() -> None:
         "review-scope-row",
         "workflow-guide",
         "workflow-stepper",
+        "workflow-step-details",
         "recovery-center",
         "operation-progress",
         "why-blocked-details",
         "validation-project-controls",
+        "viewer-sheet-jump",
+        "viewer-control-group",
+        "manual-placement-banner",
+        "manual-review-steps",
+        "manual-review-panel",
+        "final-readiness-requirements",
         "experimental-ai-action",
         "missed-issue-audit-panel",
+        "sanitizeAuditObject",
+        "looksLikeLocalPath",
         "success-helper",
         "warning-helper",
     ]

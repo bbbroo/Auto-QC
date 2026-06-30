@@ -304,27 +304,15 @@ Each AI import preview/import creates an import batch record with source type, p
 
 Review modalities are explicit in batch metadata: `manual_pdf_attached_external` for the primary ChatGPT/Copilot path, `text_context_only` for the experimental Direct AI lab path, and reserved `pdf_image_direct` for a future direct PDF/image-capable review. Second-pass missed-issue audit imports store `audit_of_batch_id`, `audit_round`, and `audit_yield_count`.
 
-The findings panel includes a Finding Quality/Placement dashboard for exact placed, fuzzy placed, page-level, manual placement needed, low confidence, accepted, needs review, and duplicate/merged groups. These groups organize imported AI findings; they do not create findings.
-
-## Checklist Tracker
-
-AutoQC includes a checklist coverage tracker for client/package review organization, starting with an Xcel Engineering Package QC Checklist-style template. Checklist items track coverage and can link to existing AI findings. They do not create drawing findings, do not infer issues, and do not replace the attached PDF or reviewer judgment.
-
-Checklist item statuses are:
-
-- Not started
-- Checked
-- Issue found
-- Not applicable
-- Needs human review
-
-The checklist UI lets reviewers select a project checklist, filter sections such as All Sheets, Cover Sheet, Index, General Notes, Regulator Characteristics, PFD, P&ID, Civil/Structural, Civil Site, Demo, Mechanical Plan, Piping Sections/Details, Isometric, Heat Number/MTR, Weld/NDE, Bolt Torque, BOM, and Environmental, update statuses, add reviewer notes, link existing findings, and see completion progress. Checklist completion is included in export summaries when a checklist is selected.
+The simplified core UI keeps primary navigation to Projects, Review, Findings, and Export. Sheet jumping lives in the drawing viewer, while System Check, AI Import History, Audit Log, Sample Project, Direct AI Text Only, project package backup/restore, and Markup Memory live in Advanced. The findings panel includes placement-quality filters for exact placed, fuzzy placed, page-level, manual placement needed, and low-confidence findings. These filters organize imported AI findings; they do not create findings.
 
 ## Backup, Restore, and Rollback
 
-Use `Export Project Package` in the Projects panel to create a portable AutoQC zip archive. The package includes project metadata, sheet metadata, imported AI findings and reviewer edits/statuses, AI prompt/import history, audit events, export records, safe local source PDF copy when available, rendered sheet images, and generated export files. Package `project.json` strips local absolute file paths for source PDFs, sheet images, and export artifacts; restore rebuilds local paths from the package file manifest.
+Use `Export Project Package` in Advanced to create a portable AutoQC zip archive. The package includes project metadata, sheet metadata, imported AI findings and reviewer edits/statuses, AI prompt/import history, audit events, export records, safe local source PDF copy when available, rendered sheet images, and generated export files. Package `project.json` strips local absolute file paths for source PDFs, sheet images, export artifacts, and audit-event change details; restore rebuilds local paths from the package file manifest.
 
-Use `Import Project Package` to restore a package. AutoQC runs a dry-run validation first: zip readability, schema and required JSON, safe paths, allowed file extensions, uncompressed size/file-count limits, source PDF readability, image readability, payload shape, and checksums when present. If restore fails after file copying starts, AutoQC removes the newly-created project directory and partial project row where practical. AutoQC does not overwrite an existing project by default; if the original project ID already exists, the restore is remapped to new IDs consistently. Older packages with missing optional collections are accepted with compatibility warnings; unsupported schema versions fail with a clear message.
+Use `Import Project Package` in Advanced to restore a package. AutoQC runs a dry-run validation first: zip readability, schema and required JSON, safe paths, allowed file extensions, upload/uncompressed size and file-count limits, source PDF readability, image readability, payload shape, and checksums when present. Checksum mismatches block restore. If restore fails after file copying starts, AutoQC removes the newly-created project directory and partial project row where practical. AutoQC does not overwrite an existing project by default; if the original project ID already exists, the restore is remapped to new IDs consistently. Older packages with missing optional collections are accepted with compatibility warnings; unsupported schema versions fail with a clear message.
+
+Public project/export/package/audit API responses expose download URLs, filenames, counts, and status details rather than local filesystem paths. The backend keeps managed paths internally so it can serve files safely.
 
 Use `Remove imported batch` in AI Import History to roll back findings created by a specific AI import batch. The confirmation states how many findings will be removed and how many reviewed/edited findings are affected. Updated pre-existing findings and unrelated findings are not deleted.
 
@@ -380,7 +368,7 @@ Markup Memory is off by default. To use it, open Help, choose `Advanced Features
 
 ## Try the Sample
 
-In the UI, click `Sample Package`. The backend generates a synthetic regulator station drawing package and processes it for sheets/page context.
+In the UI, open Advanced and click `Sample Project`. The backend generates a synthetic regulator station drawing package and processes it for sheets/page context.
 
 Because the app is now AI-only for review findings, opening or processing the sample does not create user-facing rule-based findings. Use `Chat Prompt`, attach the sample PDF to ChatGPT/Copilot, preview the returned update JSON, import valid updates, and then export the marked PDF.
 
@@ -394,7 +382,7 @@ python scripts/stress_large_package.py
 ```
 
 Some legacy sample scripts may still mention review rules. Treat the active UI workflow as AI-only.
-`scripts/run_sample_review.py` processes the sample package shell only; it skips export until AI updates have been imported. `scripts/smoke_ai_workflow.py` runs a complete local smoke path with synthetic AI JSON import and marked PDF export.
+`scripts/run_sample_review.py` processes the sample project shell only; it skips export until AI updates have been imported. `scripts/smoke_ai_workflow.py` runs a complete local smoke path with synthetic AI JSON import and marked PDF export.
 
 ## Exports
 
@@ -469,7 +457,6 @@ The backend tests cover:
 - legacy project/package compatibility defaults
 - raw AI response preservation with public API redaction
 - manual placement persistence
-- checklist tracker selection, progress, and existing-finding links
 - export safety for bad/missing annotation rectangles
 - empty export prevention
 - marked PDF export behavior, placement statuses, and QA report output

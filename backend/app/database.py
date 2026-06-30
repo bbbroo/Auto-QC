@@ -858,7 +858,6 @@ class Database:
                 action="export_created",
                 changes={
                     "export_id": export["id"],
-                    "export_dir": export["export_dir"],
                     "status_filter": export.get("status_filter") or [],
                     "finding_count": int(export.get("finding_count") or 0),
                     "validation_status": (export.get("validation") or {}).get("status"),

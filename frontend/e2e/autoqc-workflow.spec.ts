@@ -16,17 +16,19 @@ async function clearProjects(request: APIRequestContext) {
   }
 }
 
-async function openUploadSectionIfNeeded(page: Page) {
-  const sampleButton = page.getByRole("button", { name: "Sample Package" });
-  if (!(await sampleButton.isVisible())) {
-    await page.getByText("Upload / sample package").click();
-  }
+async function openAdvancedPanel(page: Page) {
+  await page.getByRole("button", { name: "Open Advanced tools" }).click();
+  await expect(page.getByRole("region", { name: "Advanced Features" })).toBeVisible();
+}
+
+async function createSampleProject(page: Page) {
+  await openAdvancedPanel(page);
+  await page.getByRole("button", { name: "Sample Project" }).click();
+  await expect(page.getByText("Synthetic Regulator Station Sample").first()).toBeVisible();
 }
 
 async function createSampleAndImportValidAi(page: Page) {
-  await openUploadSectionIfNeeded(page);
-  await page.getByRole("button", { name: "Sample Package" }).click();
-  await expect(page.getByText("Synthetic Regulator Station Sample").first()).toBeVisible();
+  await createSampleProject(page);
   await page.getByRole("tab", { name: /Review/ }).click();
   await page.getByRole("button", { name: "Chat Prompt" }).click();
   const validAiJson = await fs.readFile(validAiFixture, "utf-8");
@@ -35,6 +37,20 @@ async function createSampleAndImportValidAi(page: Page) {
   await expect(page.getByLabel("AI import preview")).toBeVisible();
   await page.getByRole("button", { name: "Import Valid Updates" }).click();
   await expect(page.getByText("Imported 2 AI updates.")).toBeVisible();
+}
+
+async function expectNoHorizontalOverflow(page: Page) {
+  const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(horizontalOverflow).toBeLessThanOrEqual(2);
+}
+
+async function jumpToSheet(page: Page, sheetText: string) {
+  const select = page.getByLabel("Jump to sheet");
+  const value = await select.locator("option", { hasText: sheetText }).getAttribute("value");
+  if (!value) {
+    throw new Error(`Could not find sheet option: ${sheetText}`);
+  }
+  await select.selectOption(value);
 }
 
 test.beforeEach(async ({ request }) => {
@@ -52,27 +68,24 @@ test("manual Chat Prompt AI workflow can preview, import, review, and export", a
   await expect(page.getByRole("dialog", { name: "How to use AutoQC" })).toContainText("not engineering authority");
   await page.getByRole("button", { name: "Close help" }).click();
 
-  await openUploadSectionIfNeeded(page);
-  await page.getByRole("button", { name: "Sample Package" }).click();
-  await expect(page.getByText("Synthetic Regulator Station Sample").first()).toBeVisible();
-  await expect(page.getByText("5 sheets").first()).toBeVisible();
+  await createSampleProject(page);
 
   await page.getByRole("tab", { name: /Projects/ }).click();
+  await expect(page.getByText("5 sheets").first()).toBeVisible();
   await page.locator(".project-select-button", { hasText: "Synthetic Regulator Station Sample" }).click();
 
-  await page.getByRole("tab", { name: /Sheets/ }).click();
-  await expect(page.getByRole("button", { name: /PFD-100/ })).toBeVisible();
-  await page.getByRole("button", { name: /PFD-100/ }).click();
+  await expect(page.getByLabel("Jump to sheet")).toBeVisible();
+  await jumpToSheet(page, "P2 PFD-100");
   await expect(page.getByRole("heading", { name: /PFD-100/ })).toBeVisible();
   await expect(page.locator(".viewer-open-link[title*='source PDF']")).toBeVisible();
 
   await page.getByRole("tab", { name: /Review/ }).click();
+  await page.getByText("Advanced prompt options").click();
   await expect(page.getByRole("combobox", { name: "Prompt template" })).toBeVisible();
-  await expect(page.getByLabel("System Check panel")).toContainText("System Check");
   await expect(page.getByLabel("What should I do next")).toContainText("Upload PDF");
   await expect(page.getByLabel("Recovery Center")).toContainText(/No AI findings imported yet|No active recovery items/);
   await page.getByRole("button", { name: "Chat Prompt" }).click();
-  await expect(page.getByText("Manual Bridge Pro")).toBeVisible();
+  await expect(page.getByText("Manual AI Review")).toBeVisible();
   await expect(page.getByRole("link", { name: "Open Source PDF", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /Copy Prompt|Prompt Copied/ })).toBeVisible();
   await expect(page.getByRole("link", { name: "Download Prompt" })).toHaveAttribute("download", /autoqc-chat-prompt-/);
@@ -95,11 +108,15 @@ test("manual Chat Prompt AI workflow can preview, import, review, and export", a
 
   await page.getByRole("button", { name: "Import Valid Updates" }).click();
   await expect(page.getByText("Imported 2 AI updates.")).toBeVisible();
+  await openAdvancedPanel(page);
+  await expect(page.getByLabel("System Check panel")).toContainText("System Check");
   await expect(page.getByText("AI Import History")).toBeVisible();
+  await expect(page.getByLabel("Full audit log")).toContainText("AI updates imported");
 
   await page.getByRole("tab", { name: /Findings/ }).click();
   await expect(page.getByText("2 left to review")).toBeVisible();
   await expect(page.getByText("Auto-advance")).toBeVisible();
+  await page.getByText("Filters and bulk actions").click();
   await expect(page.getByText("A", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Located" }).click();
   await page.getByRole("button", { name: "All placement" }).click();
@@ -118,10 +135,19 @@ test("manual Chat Prompt AI workflow can preview, import, review, and export", a
 
   await inletFinding.click();
   await expect(page.getByRole("tab", { name: "Finding Focus" })).toHaveAttribute("aria-selected", "true");
+  const quickActions = page.locator(".drawing-surface").getByLabel("Selected finding quick actions");
+  await expect(quickActions).toContainText("Inlet isolation valve tag should be coordinated");
+  await expect(quickActions.getByText("Issue")).toBeVisible();
+  await expect(quickActions.getByRole("button", { name: "Accept" })).toBeVisible();
+  await expect(quickActions.getByRole("button", { name: "Reject" })).toBeVisible();
   await expect(page.getByText("Inspector", { exact: true })).toBeVisible();
   await expect(page.locator(".viewer-finding-card")).toHaveCount(0);
   await expect(page.getByLabel("Manual markup placement")).toContainText(/Exact target found|Fuzzy target found|Page-level finding|Manual placement/);
   await expect(page.getByRole("button", { name: "Place on drawing" })).toBeVisible();
+  await page.getByRole("button", { name: "Place on drawing" }).click();
+  await expect(page.getByText("Manual placement active")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("Manual placement active")).toBeHidden();
   await page.getByRole("button", { name: "Next sheet" }).click();
   await expect(page.getByRole("heading", { name: /PID-100/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Full Sheet" })).toHaveAttribute("aria-selected", "true");
@@ -132,40 +158,45 @@ test("manual Chat Prompt AI workflow can preview, import, review, and export", a
   await expect(page.getByText("Inspector", { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: /Findings/ }).click();
   await page.getByLabel("Auto-advance").uncheck();
-  await page.getByRole("tab", { name: /Inspect/ }).click();
-  await expect(page.getByText("Duplicate / merge")).toBeVisible();
-  const titleInput = page.getByRole("textbox", { name: "Title" });
+  const inspector = page.locator("form.inspector");
+  const statusSelect = inspector.getByLabel("Status");
+  const titleInput = inspector.getByRole("textbox", { name: "Title" });
   await titleInput.fill("Reviewer edited inlet valve coordination");
-  await page.getByLabel("Final PDF comment").fill("Reviewer final PDF comment for E2E export.");
-  await page.getByRole("button", { name: "Save" }).click();
+  await inspector.getByLabel("Final PDF comment").fill("Reviewer final PDF comment for E2E export.");
+  await inspector.getByRole("button", { name: "Save" }).click();
   await expect(titleInput).toHaveValue("Reviewer edited inlet valve coordination");
 
-  await page.getByRole("button", { name: "Reject" }).click();
-  await expect(page.getByLabel("Status")).toHaveValue("rejected");
-  await page.getByRole("button", { name: "Review", exact: true }).click();
-  await expect(page.getByLabel("Status")).toHaveValue("needs_review");
+  const rejectButton = inspector.getByRole("button", { name: "Reject", exact: true });
+  await expect(rejectButton).toBeEnabled();
+  await rejectButton.click();
+  await expect(statusSelect).toHaveValue("rejected");
+  await expect(page.getByRole("button", { name: "Undo" })).toBeVisible();
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(statusSelect).toHaveValue("needs_review");
 
   await page.getByRole("tab", { name: /Export/ }).click();
+  await page.getByText("Advanced export options").click();
   await expect(page.getByRole("button", { name: "Draft", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Final", exact: true })).toBeVisible();
   await expect(page.getByText("0 findings selected for draft export.")).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("No findings match the selected status filters");
-  await expect(page.getByRole("button", { name: "Create Draft Export" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Export Marked PDF" })).toBeDisabled();
   await expect(page.getByText("Accepted").last()).toBeVisible();
   await expect(page.getByText("Needs Review").last()).toBeVisible();
   await expect(page.getByText("Rejected").last()).toBeVisible();
 
-  await page.getByRole("tab", { name: /Inspect/ }).click();
-  await page.getByRole("button", { name: "Accept" }).click();
-  await expect(page.getByLabel("Status")).toHaveValue("accepted");
+  await page.getByRole("tab", { name: /Findings/ }).click();
+  await inspector.getByRole("button", { name: "Accept" }).click();
+  await expect(statusSelect).toHaveValue("accepted");
 
   await page.getByRole("tab", { name: /Export/ }).click();
+  await page.getByText("Advanced export options").click();
   await expect(page.getByText("1 finding selected for draft export.")).toBeVisible();
-  await page.getByRole("button", { name: "Create Draft Export" }).click();
+  await page.getByRole("button", { name: "Export Marked PDF" }).click();
   await expect(page.getByRole("link", { name: "Download Marked PDF" })).toBeVisible();
   await expect(page.getByText(/Validation (Passed|Warning|Failed)/)).toBeVisible();
-  await expect(page.getByText("Generated files")).toBeVisible();
-  await page.getByRole("tab", { name: /Review/ }).click();
+  await expect(page.getByText("Generated files", { exact: true })).toBeVisible();
+  await openAdvancedPanel(page);
   await expect(page.getByLabel("Full audit log")).toContainText(/Draft export created|AI updates imported/);
 });
 
@@ -177,20 +208,21 @@ test("import history can remove an imported batch with confirmation", async ({ p
     expect(dialog.message()).toContain("2 findings");
     await dialog.accept();
   });
+  await openAdvancedPanel(page);
   await page.getByText("AI Import History").click();
   await page.getByRole("button", { name: "Remove imported batch" }).click();
-  await expect(page.getByText(/Rolled back import batch and removed 2 findings/)).toBeVisible();
+  await expect(page.getByLabel("Recent AI import batches")).toContainText("Rolled Back");
   await page.getByRole("tab", { name: /Findings/ }).click();
   await expect(page.getByText("No AI findings imported yet")).toBeVisible();
-  await page.getByRole("tab", { name: /Review/ }).click();
+  await openAdvancedPanel(page);
   await expect(page.getByLabel("Full audit log")).toContainText("AI import batch rolled back");
 });
 
 test("PDF viewer supports pane zoom, markup selection, no popup, and left rail collapse", async ({ page }) => {
   await page.goto("/");
   await createSampleAndImportValidAi(page);
-  await page.getByRole("tab", { name: /Sheets/ }).click();
-  await page.getByRole("button", { name: /PFD-100/ }).click();
+  await jumpToSheet(page, "P2 PFD-100");
+  await expect(page.getByRole("heading", { name: /PFD-100/ })).toBeVisible();
 
   const viewport = page.locator(".drawing-pan-viewport");
   const stage = page.locator(".drawing-stage");
@@ -223,6 +255,20 @@ test("PDF viewer supports pane zoom, markup selection, no popup, and left rail c
   expect(afterWindowScroll).toBe(beforeWindowScroll);
 
   await page.locator(".finding-overlay").first().click();
+  const drawingSurface = page.locator(".drawing-surface");
+  const quickActions = drawingSurface.getByLabel("Selected finding quick actions");
+  await expect(quickActions).toBeVisible();
+  await expect(quickActions.getByText("Issue")).toBeVisible();
+  await expect(quickActions.getByRole("button", { name: "Accept" })).toBeVisible();
+  await expect(quickActions.getByRole("button", { name: "Reject" })).toBeVisible();
+  const surfaceBox = await drawingSurface.boundingBox();
+  const quickActionBox = await quickActions.boundingBox();
+  expect(surfaceBox).not.toBeNull();
+  expect(quickActionBox).not.toBeNull();
+  if (surfaceBox && quickActionBox) {
+    expect(quickActionBox.y).toBeGreaterThanOrEqual(surfaceBox.y);
+    expect(quickActionBox.y + quickActionBox.height).toBeLessThanOrEqual(surfaceBox.y + surfaceBox.height + 1);
+  }
   await expect(page.getByText("Inspector", { exact: true })).toBeVisible();
   await expect(page.locator(".viewer-finding-card")).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "Finding Focus" })).toHaveAttribute("aria-selected", "true");
@@ -241,18 +287,37 @@ test("backend unavailable state shows a visible alert", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText(/Failed to fetch|Load failed|NetworkError/);
 });
 
-test("narrow viewport keeps the workflow reachable", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 820 });
+test("reviewer workstation stays reachable across common viewports", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
 
   await expect(page.getByRole("button", { name: "Go to review library" })).toBeVisible();
-  await openUploadSectionIfNeeded(page);
-  await page.getByRole("button", { name: "Sample Package" }).click();
-  await expect(page.getByText("Synthetic Regulator Station Sample").first()).toBeVisible();
-  await expect(page.getByRole("tab", { name: /Sheets/ }).first()).toBeVisible();
+  await createSampleProject(page);
 
-  const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-  expect(horizontalOverflow).toBeLessThanOrEqual(2);
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1366, height: 768 },
+    { width: 1024, height: 768 },
+    { width: 390, height: 820 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(page.getByRole("button", { name: "Go to review library" })).toBeVisible();
+    await expect(page.getByText("Synthetic Regulator Station Sample").first()).toBeVisible();
+    await expect(page.getByLabel("Jump to sheet")).toBeVisible();
+    await expect(page.locator(".viewer-pane")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByRole("tab", { name: /Review/ }).click();
+    await expect(page.getByLabel("Current work summary")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Chat Prompt" })).toBeVisible();
+
+    await page.getByRole("tab", { name: /Findings/ }).click();
+    await expect(page.getByText("Filters and bulk actions")).toBeVisible();
+
+    await page.getByRole("tab", { name: /Export/ }).click();
+    await expect(page.getByRole("button", { name: "Export Marked PDF" })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+  }
 });
 
 test("keyboard focus is visible and can move through primary controls", async ({ page }) => {
@@ -270,7 +335,7 @@ test("keyboard focus is visible and can move through primary controls", async ({
 
   await page.getByRole("tab", { name: "Projects" }).focus();
   await page.keyboard.press("ArrowDown");
-  await expect(page.getByRole("tab", { name: "Sheets" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Review" })).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("End");
   await expect(page.getByRole("tab", { name: "Export" })).toHaveAttribute("aria-selected", "true");
 });

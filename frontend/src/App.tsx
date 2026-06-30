@@ -44,11 +44,9 @@ import {
   getMarkupMemoryStats,
   getManualAIPrompt,
   getManualReviewPlan,
-  getProjectChecklist,
   getProject,
   importProjectPackage,
   importManualAIPreview,
-  listChecklistTemplates,
   listAIImportBatches,
   listFindingEvents,
   listFindings,
@@ -67,9 +65,7 @@ import {
   runAIReview,
   saveManualPlacement,
   saveAISettings,
-  selectProjectChecklist,
   tagGeneratedValidationProjects,
-  updateProjectChecklistItem,
   updateMarkupMemorySettings,
   updateFinding,
 } from "./api";
@@ -79,10 +75,6 @@ import type {
   AIImportBatch,
   AIPreviewResponse,
   BatchRollbackPreview,
-  ChecklistItem,
-  ChecklistItemUpdate,
-  ChecklistStatus,
-  ChecklistTemplate,
   ExportResponse,
   Finding,
   FindingEvent,
@@ -97,7 +89,6 @@ import type {
   ManualReviewDeepDiveCandidate,
   ManualReviewPlan,
   PlacementSummary,
-  ProjectChecklist,
   ProjectPackageImportPreview,
   ReviewCoverageSummary,
   PromptTemplate,
@@ -123,9 +114,10 @@ import {
 
 type StatusFilter = "all" | FindingStatus;
 type PlacementFilter = "all" | "located" | "exact" | "fuzzy" | "page_level" | "manual" | "low_confidence";
-type LeftRailCard = "review" | "projects" | "sheets" | "findings" | "inspector" | "checklist" | "export" | "advanced";
+type LeftRailCard = "review" | "projects" | "findings" | "export" | "advanced";
 type PromptDepth = "fast" | "standard" | "comprehensive" | "exhaustive";
 type LargePackageMode = "hybrid" | "package";
+const PRIMARY_FINDING_STATUSES: FindingStatus[] = ["needs_review", "accepted", "rejected"];
 type OperationStatus = "active" | "success" | "warning" | "error";
 type WorkflowStepStatus = "done" | "ready" | "blocked" | "waiting";
 
@@ -160,7 +152,7 @@ interface RecoveryCard {
   onSecondaryAction?: () => void;
 }
 
-const PRIMARY_WORKFLOW_CARDS: LeftRailCard[] = ["projects", "sheets", "review", "findings", "inspector", "checklist", "export"];
+const PRIMARY_WORKFLOW_CARDS: LeftRailCard[] = ["projects", "review", "findings", "export"];
 
 interface ImageSize {
   width: number;
@@ -179,6 +171,13 @@ type ViewerMode = "focus" | "sheet" | "marked";
 interface NoticeItem {
   title: string;
   detail: string;
+}
+
+interface FindingStatusUndo {
+  findingId: string;
+  title: string;
+  previousStatus: FindingStatus;
+  nextStatus: FindingStatus;
 }
 
 interface UploadAssessment {
@@ -206,7 +205,7 @@ function App() {
   const [aiStatus, setAIStatus] = useState<AIStatus | null>(null);
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   const [selectedPromptTemplateId, setSelectedPromptTemplateId] = useState<string | null>(null);
-  const [selectedPromptDepth, setSelectedPromptDepth] = useState<PromptDepth>("standard");
+  const [selectedPromptDepth, setSelectedPromptDepth] = useState<PromptDepth>("exhaustive");
   const [largePackageMode, setLargePackageMode] = useState<LargePackageMode>("hybrid");
   const [largePackageBatchSize, setLargePackageBatchSize] = useState(8);
   const [manualReviewPlan, setManualReviewPlan] = useState<ManualReviewPlan | null>(null);
@@ -257,10 +256,6 @@ function App() {
   const [placementSummary, setPlacementSummary] = useState<PlacementSummary | null>(null);
   const [manualPlacementFindingId, setManualPlacementFindingId] = useState<string | null>(null);
   const [savingManualPlacement, setSavingManualPlacement] = useState(false);
-  const [checklistTemplates, setChecklistTemplates] = useState<ChecklistTemplate[]>([]);
-  const [projectChecklist, setProjectChecklist] = useState<ProjectChecklist | null>(null);
-  const [loadingChecklist, setLoadingChecklist] = useState(false);
-  const [savingChecklistItemId, setSavingChecklistItemId] = useState<string | null>(null);
   const [loadingMarkupMemory, setLoadingMarkupMemory] = useState(false);
   const [savingMarkupMemory, setSavingMarkupMemory] = useState(false);
   const [rebuildingMarkupMemory, setRebuildingMarkupMemory] = useState(false);
@@ -268,6 +263,7 @@ function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [operation, setOperation] = useState<OperationProgress | null>(null);
+  const [statusUndo, setStatusUndo] = useState<FindingStatusUndo | null>(null);
 
   const selectedProject =
     projectDetails ?? projects.find((project) => project.id === selectedProjectId) ?? null;
@@ -336,7 +332,6 @@ function App() {
     void refreshProjects();
     void refreshAIStatus();
     void refreshPromptTemplates();
-    void refreshChecklistTemplates();
     void refreshReadiness();
   }, []);
 
@@ -362,7 +357,6 @@ function App() {
       setPlacementMessage(null);
       setPlacementSummary(null);
       setManualPlacementFindingId(null);
-      setProjectChecklist(null);
       setMarkupMemoryPreview(null);
       return;
     }
@@ -472,29 +466,6 @@ function App() {
       setSelectedPromptTemplateId((current) => current ?? templates[0]?.id ?? null);
     } catch {
       setPromptTemplates([]);
-    }
-  }
-
-  async function refreshChecklistTemplates() {
-    try {
-      setChecklistTemplates(await listChecklistTemplates());
-    } catch {
-      setChecklistTemplates([]);
-    }
-  }
-
-  async function refreshProjectChecklist(projectId = selectedProjectId) {
-    if (!projectId) {
-      setProjectChecklist(null);
-      return;
-    }
-    setLoadingChecklist(true);
-    try {
-      setProjectChecklist(await getProjectChecklist(projectId));
-    } catch (requestError) {
-      setError(getApiErrorMessage(requestError));
-    } finally {
-      setLoadingChecklist(false);
     }
   }
 
@@ -629,13 +600,12 @@ function App() {
     setError(null);
 
     try {
-      const [project, nextSheets, nextFindings, nextEvents, nextBatches, nextChecklist, nextReviewPlan] = await Promise.all([
+      const [project, nextSheets, nextFindings, nextEvents, nextBatches, nextReviewPlan] = await Promise.all([
         getProject(projectId),
         listSheets(projectId),
         listFindings(projectId),
         listFindingEvents(projectId),
         listAIImportBatches(projectId),
-        getProjectChecklist(projectId),
         getManualReviewPlan(projectId, largePackageBatchSize).catch(() => null),
       ]);
 
@@ -644,7 +614,6 @@ function App() {
       setFindings(nextFindings);
       setEvents(nextEvents);
       setAIImportBatches(nextBatches);
-      setProjectChecklist(nextChecklist);
       setManualReviewPlan(nextReviewPlan);
       setSelectedSheetId((current) => {
         if (current && nextSheets.some((sheet) => sheet.id === current)) {
@@ -697,20 +666,20 @@ function App() {
     setError(null);
     setManualAIImportMessage(null);
     setManualAIPreview(null);
-    startOperation("Create sample package", ["Creating sample", "Extracting sheets", "Refreshing workspace"]);
+    startOperation("Create sample project", ["Creating sample", "Extracting sheets", "Refreshing workspace"]);
 
     try {
-      advanceOperation(0, "Creating the local sample package.");
+      advanceOperation(0, "Creating the local sample project.");
       const project = await createSampleProject();
-      advanceOperation(2, "Sample package created. Refreshing the workspace.");
+      advanceOperation(2, "Sample project created. Refreshing the workspace.");
       setSelectedProjectId(project.id);
       await refreshProjects();
       await refreshReview(project.id);
-      finishOperation("success", "Sample package is ready for the manual AI workflow.");
+      finishOperation("success", "Sample project is ready for the manual AI workflow.");
     } catch (requestError) {
       const message = getApiErrorMessage(requestError);
       setError(message);
-      finishOperation("error", `Sample package failed. ${message}`);
+      finishOperation("error", `Sample project failed. ${message}`);
     } finally {
       setCreatingSample(false);
     }
@@ -958,7 +927,7 @@ function App() {
               batchSize: largePackageBatchSize,
             }
           : defaultManualPromptScopeOptions();
-      advanceOperation(1, "Building prompt context from extracted sheets, metadata, and checklist coverage.");
+      advanceOperation(1, "Building prompt context from extracted sheets, metadata, and review coverage.");
       const result = await getManualAIPrompt(selectedProjectId, selectedPromptTemplateId, selectedPromptDepth, scopeOptions);
       if (!result.prompt?.trim()) {
         throw new Error("Manual AI prompt response was empty. Refresh the project and try again.");
@@ -1292,7 +1261,9 @@ function App() {
     }
   }
 
-  async function handlePatchFinding(findingId: string, update: FindingUpdate) {
+  async function handlePatchFinding(findingId: string, update: FindingUpdate, options: { suppressUndo?: boolean } = {}) {
+    const previous = findings.find((finding) => finding.id === findingId) ?? null;
+    const isStatusOnlyUpdate = Boolean(update.status) && Object.keys(update).length === 1;
     setSavingFindingId(findingId);
     setError(null);
 
@@ -1314,11 +1285,37 @@ function App() {
         }
         return nextFindings;
       });
+      if (
+        isStatusOnlyUpdate &&
+        !options.suppressUndo &&
+        previous &&
+        update.status &&
+        previous.status !== updated.status
+      ) {
+        setStatusUndo({
+          findingId,
+          title: updated.title,
+          previousStatus: previous.status,
+          nextStatus: updated.status,
+        });
+      } else if (!isStatusOnlyUpdate) {
+        setStatusUndo(null);
+      }
     } catch (requestError) {
       setError(getApiErrorMessage(requestError));
     } finally {
       setSavingFindingId(null);
     }
+  }
+
+  async function handleUndoFindingStatus() {
+    if (!statusUndo) {
+      return;
+    }
+
+    const undo = statusUndo;
+    setStatusUndo(null);
+    await handlePatchFinding(undo.findingId, { status: undo.previousStatus }, { suppressUndo: true });
   }
 
   async function handleBulkPatchFindings(targetFindings: Finding[], update: FindingUpdate) {
@@ -1442,50 +1439,10 @@ function App() {
     }
   }
 
-  async function handleSelectChecklist(checklistId: string) {
-    if (!selectedProjectId || !checklistId) {
-      return;
-    }
-    setLoadingChecklist(true);
-    setError(null);
-    try {
-      setProjectChecklist(await selectProjectChecklist(selectedProjectId, checklistId));
-      setManualAIImportMessage("Checklist selected. It will track coverage and linked findings only.");
-      setEvents(await listFindingEvents(selectedProjectId));
-    } catch (requestError) {
-      setError(getApiErrorMessage(requestError));
-    } finally {
-      setLoadingChecklist(false);
-    }
-  }
-
-  async function handleUpdateChecklistItem(item: ChecklistItem, update: ChecklistItemUpdate) {
-    if (!selectedProjectId) {
-      return;
-    }
-    setSavingChecklistItemId(item.id);
-    setError(null);
-    try {
-      const updated = await updateProjectChecklistItem(selectedProjectId, item.id, update);
-      setProjectChecklist((current) => {
-        if (!current) {
-          return current;
-        }
-        const items = current.items.map((candidate) => (candidate.id === updated.id ? updated : candidate));
-        return { ...current, items, progress: computeChecklistProgress(items) };
-      });
-      setEvents(await listFindingEvents(selectedProjectId));
-    } catch (requestError) {
-      setError(getApiErrorMessage(requestError));
-    } finally {
-      setSavingChecklistItemId(null);
-    }
-  }
-
   function handleSelectFinding(finding: Finding) {
     setSelectedFindingId(finding.id);
     setLastSelectedFindingId(finding.id);
-    setLeftRailCard("inspector");
+    setLeftRailCard("findings");
     setLeftRailCollapsed(false);
     const sheet = getFindingSheet(finding, sheets);
     if (sheet) {
@@ -1496,7 +1453,7 @@ function App() {
   function handleSelectPdfMarkup(finding: Finding) {
     setSelectedFindingId(finding.id);
     setLastSelectedFindingId(finding.id);
-    setLeftRailCard("inspector");
+    setLeftRailCard("findings");
     setLeftRailCollapsed(false);
     const sheet = getFindingSheet(finding, sheets);
     if (sheet) {
@@ -1547,7 +1504,11 @@ function App() {
         return;
       }
 
-      if (event.key === "a" && selectedFinding) {
+      if (event.key === "Escape" && manualPlacementFindingId) {
+        event.preventDefault();
+        setManualPlacementFindingId(null);
+        setPlacementMessage(null);
+      } else if (event.key === "a" && selectedFinding) {
         event.preventDefault();
         void handlePatchFinding(selectedFinding.id, { status: "accepted" });
       } else if (event.key === "x" && selectedFinding) {
@@ -1576,42 +1537,28 @@ function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedFinding, selectedFindingId, findings, reviewQueueFindings, selectedSheet, sheets, autoAdvanceReview]);
+  }, [selectedFinding, selectedFindingId, findings, reviewQueueFindings, selectedSheet, sheets, autoAdvanceReview, manualPlacementFindingId]);
 
   const leftRailPanelTitle =
     leftRailCard === "projects"
       ? "Home"
-      : leftRailCard === "sheets"
-        ? "Sheets"
-        : leftRailCard === "review"
-          ? "Review"
-        : leftRailCard === "findings"
-          ? "Findings"
-          : leftRailCard === "inspector"
-            ? "Inspect"
-            : leftRailCard === "checklist"
-              ? "Checklist"
-              : leftRailCard === "export"
-                ? "Export"
-                : "Advanced";
+      : leftRailCard === "review"
+        ? "Review"
+      : leftRailCard === "findings"
+        ? "Findings"
+      : leftRailCard === "export"
+        ? "Export"
+      : "Advanced";
   const leftRailPanelSubtitle =
     leftRailCard === "projects"
       ? `${projects.length} projects`
-      : leftRailCard === "sheets"
-        ? `${sheets.length} sheets`
-        : leftRailCard === "findings"
-          ? `${findings.length} findings`
-          : leftRailCard === "inspector"
-            ? selectedFinding
-              ? "Selected finding details"
-              : "No finding selected"
-            : leftRailCard === "checklist"
-              ? "Coverage tracker"
-              : leftRailCard === "export"
-                ? "Marked PDF and logs"
-                : leftRailCard === "advanced"
-                  ? "Experimental tools"
-                  : "AI prompt bridge";
+      : leftRailCard === "findings"
+        ? `${findings.length} findings`
+      : leftRailCard === "export"
+        ? "Marked PDF and logs"
+      : leftRailCard === "advanced"
+        ? "Experimental tools"
+      : "AI prompt bridge";
 
   function openLeftRailCard(card: LeftRailCard) {
     setLeftRailCard(card);
@@ -1674,19 +1621,6 @@ function App() {
             <span>Projects</span>
           </button>
           <button
-            className={`nav-item ${leftRailCard === "sheets" && !leftRailCollapsed ? "active" : ""}`}
-            type="button"
-            role="tab"
-            aria-selected={leftRailCard === "sheets" && !leftRailCollapsed}
-            data-left-rail-card="sheets"
-            title="Go to the sheet package index"
-            aria-label="Sheets"
-            onClick={() => openLeftRailCard("sheets")}
-          >
-            <FileText size={17} />
-            <span>Sheets</span>
-          </button>
-          <button
             className={`nav-item ${leftRailCard === "review" && !leftRailCollapsed ? "active" : ""}`}
             type="button"
             role="tab"
@@ -1713,32 +1647,6 @@ function App() {
             <span>Findings</span>
           </button>
           <button
-            className={`nav-item ${leftRailCard === "inspector" && !leftRailCollapsed ? "active" : ""}`}
-            type="button"
-            role="tab"
-            aria-selected={leftRailCard === "inspector" && !leftRailCollapsed}
-            data-left-rail-card="inspector"
-            title="Open the selected finding inspector"
-            aria-label="Inspector"
-            onClick={() => openLeftRailCard("inspector")}
-          >
-            <ClipboardCheck size={17} />
-            <span>Inspect</span>
-          </button>
-          <button
-            className={`nav-item ${leftRailCard === "checklist" && !leftRailCollapsed ? "active" : ""}`}
-            type="button"
-            role="tab"
-            aria-selected={leftRailCard === "checklist" && !leftRailCollapsed}
-            data-left-rail-card="checklist"
-            title="Open the checklist coverage tracker"
-            aria-label="Checklist"
-            onClick={() => openLeftRailCard("checklist")}
-          >
-            <ClipboardCheck size={17} />
-            <span>Checklist</span>
-          </button>
-          <button
             className={`nav-item ${leftRailCard === "export" && !leftRailCollapsed ? "active" : ""}`}
             type="button"
             role="tab"
@@ -1762,6 +1670,17 @@ function App() {
           <HelpCircle size={17} />
           <span>Help</span>
         </button>
+        <button
+          className={`nav-item nav-advanced ${leftRailCard === "advanced" && !leftRailCollapsed ? "active" : ""}`}
+          type="button"
+          title="Open power-user and diagnostic tools"
+          aria-label="Open Advanced tools"
+          data-left-rail-card="advanced"
+          onClick={() => openLeftRailCard("advanced")}
+        >
+          <ShieldCheck size={17} />
+          <span>Advanced</span>
+        </button>
         <div className="usage-widget">
           <strong>{projects.length}</strong>
           <span>projects</span>
@@ -1779,6 +1698,18 @@ function App() {
       ) : null}
 
       {operation ? <OperationProgressPanel operation={operation} onDismiss={operation.status === "active" ? undefined : clearOperation} /> : null}
+
+      {statusUndo ? (
+        <div className="status-undo-banner" role="status" aria-live="polite">
+          <Check size={16} />
+          <span>
+            {formatStatus(statusUndo.nextStatus)} saved for {statusUndo.title}.
+          </span>
+          <button type="button" onClick={() => void handleUndoFindingStatus()}>
+            Undo
+          </button>
+        </div>
+      ) : null}
 
       {helpOpen ? (
         <HelpDialog
@@ -1838,16 +1769,6 @@ function App() {
                     <RefreshCw size={14} className={loadingProjects || loadingReview ? "spin" : ""} />
                     Sync
                   </button>
-                  <button
-                    className="secondary-button compact-action experimental-ai-action"
-                    type="button"
-                    disabled={!selectedProjectId || runningAIReview}
-                    title="Advanced experimental lab path. Uses extracted text context only and is not equivalent to the PDF-attached Chat Prompt workflow."
-                    onClick={() => void handleRunAIReview()}
-                  >
-                    {runningAIReview ? <Sparkles size={14} className="spin" /> : <AlertTriangle size={14} />}
-                    {runningAIReview ? "AI reviewing" : "Text-only AI Lab"}
-                  </button>
                 </div>
               </div>
               {sheets.length > 1 ? (
@@ -1855,16 +1776,13 @@ function App() {
                   Large package review: hybrid mode reviews every page in adaptive batches, then queues text-heavy sheets for single-sheet deep dives.
                 </div>
               ) : null}
-              <div className="inline-helper warning-helper">
-                Direct AI Review is experimental and text-context-only. The manual Chat Prompt workflow with the actual PDF attached is the pilot review path.
-              </div>
 
-              <DashboardSummary
+              <CurrentWorkSummary
                 project={selectedProject}
+                sheet={selectedSheet}
                 findings={findings}
-                batches={aiImportBatches}
-                events={events}
-                placementSummary={placementSummary ?? computePlacementSummary(findings)}
+                reviewProgress={reviewProgress}
+                coverage={selectedProject?.review_coverage ?? latestImportCoverage(aiImportBatches.find((batch) => batch.import_status === "imported") ?? aiImportBatches[0])}
               />
 
               <WorkflowGuide
@@ -1895,6 +1813,29 @@ function App() {
                 onRecalculatePlacement={() => void handleRecalculatePlacement()}
               />
 
+              <details className="collapsible-section workstation-detail-panel">
+                <summary>
+                  <span>
+                    <strong>Review dashboard</strong>
+                    <small>Counts, placement quality, latest import/export, and readiness warnings</small>
+                  </span>
+                </summary>
+                <DashboardSummary
+                  project={selectedProject}
+                  findings={findings}
+                  batches={aiImportBatches}
+                  events={events}
+                  placementSummary={placementSummary ?? computePlacementSummary(findings)}
+                />
+              </details>
+
+              <details className="collapsible-section advanced-prompt-options">
+                <summary>
+                  <span>
+                    <strong>Advanced prompt options</strong>
+                    <small>Defaults use Exhaustive Deep Review with adaptive batching</small>
+                  </span>
+                </summary>
               <div className="template-manager compact-section" aria-label="Prompt template manager">
                 <label className="field-label">
                   Prompt template
@@ -1960,6 +1901,8 @@ function App() {
                 />
               ) : null}
 
+              </details>
+
               {manualAIImportMessage ? (
                 <div className="system-banner success-banner" role="status">
                   <Check size={16} />
@@ -1968,16 +1911,16 @@ function App() {
               ) : null}
 
               {manualAIPrompt !== null ? (
-                <section className="manual-ai-panel manual-bridge-pro" aria-label="Manual ChatGPT or Copilot AI review bridge">
+                <section className="manual-ai-panel manual-review-panel" aria-label="Manual ChatGPT or Copilot AI review bridge">
                   <div className="manual-ai-header">
                     <div>
-                      <strong>Manual Bridge Pro</strong>
+                      <strong>Manual AI Review</strong>
                       <span>AutoQC guides the no-API workflow: copy/open ChatGPT or Copilot, attach the same PDF, then paste or drop the JSON response for validation and import.</span>
                     </div>
                     <button
                       className="secondary-button"
                       type="button"
-                      title="Close the manual AI bridge panel"
+                      title="Close the manual AI review panel"
                       onClick={() => {
                         setManualAIPrompt(null);
                         setManualAIPromptId(null);
@@ -1990,7 +1933,7 @@ function App() {
                     </button>
                   </div>
 
-                  <div className="manual-bridge-checklist" aria-label="Manual bridge progress checklist">
+                  <div className="manual-review-steps" aria-label="Manual AI review progress steps">
                     <span className={manualAIPrompt ? "done" : ""}><Check size={13} /> Prompt generated</span>
                     <span className={manualAICopied ? "done" : ""}><Check size={13} /> Prompt copied</span>
                     <span><Upload size={13} /> Attach PDF in ChatGPT/Copilot</span>
@@ -2098,13 +2041,6 @@ function App() {
                 </section>
               ) : null}
 
-              <AIImportHistory
-                batches={aiImportBatches}
-                rollingBackBatchId={rollingBackBatchId}
-                onRollbackBatch={handleRollbackImportBatch}
-              />
-              <ReadinessPanel readiness={readiness} onRefresh={refreshReadiness} />
-              <AuditLogPanel events={events} />
             </section>
           ) : null}
 
@@ -2114,10 +2050,7 @@ function App() {
               selectedProjectId={selectedProjectId}
               loading={loadingProjects}
               uploading={uploading}
-              creatingSample={creatingSample}
               deletingProjectId={deletingProjectId}
-              exportingPackage={exportingPackage}
-              importingPackage={importingPackage}
               showValidationProjects={showValidationProjects}
               taggingValidationProjects={taggingValidationProjects}
               cleaningValidationProjects={cleaningValidationProjects}
@@ -2125,22 +2058,9 @@ function App() {
               onRefresh={refreshProjects}
               onShowValidationProjectsChange={setShowValidationProjects}
               onUpload={handleUpload}
-              onSampleProject={handleSampleProject}
               onDeleteProject={handleDeleteProject}
-              onExportPackage={handleExportProjectPackage}
-              onImportPackage={handleImportProjectPackage}
               onTagGeneratedValidationProjects={handleTagGeneratedValidationProjects}
               onClearValidationProjects={handleClearValidationProjects}
-            />
-          ) : null}
-
-          {leftRailCard === "sheets" ? (
-            <SheetsPanel
-              sheets={sheets}
-              findings={findings}
-              selectedSheetId={selectedSheetId}
-              disabled={!selectedProject}
-              onSelectSheet={handleSelectSheet}
             />
           ) : null}
 
@@ -2159,7 +2079,7 @@ function App() {
             />
           ) : null}
 
-          {leftRailCard === "inspector" ? (
+          {leftRailCard === "findings" ? (
             <FindingInspector
               finding={selectedFinding}
               findings={findings}
@@ -2183,21 +2103,6 @@ function App() {
             />
           ) : null}
 
-          {leftRailCard === "checklist" ? (
-            <ChecklistPanel
-              project={selectedProject}
-              templates={checklistTemplates}
-              checklist={projectChecklist}
-              findings={findings}
-              loading={loadingChecklist}
-              savingItemId={savingChecklistItemId}
-              onRefresh={refreshProjectChecklist}
-              onSelectChecklist={handleSelectChecklist}
-              onUpdateItem={handleUpdateChecklistItem}
-              onSelectFinding={handleSelectFinding}
-            />
-          ) : null}
-
           {leftRailCard === "export" ? (
             <ExportPanel
               project={selectedProject}
@@ -2215,6 +2120,9 @@ function App() {
           {leftRailCard === "advanced" ? (
             <AdvancedFeaturesPanel
               project={selectedProject}
+              batches={aiImportBatches}
+              events={events}
+              readiness={readiness}
               settings={markupMemorySettings}
               stats={markupMemoryStats}
               preview={markupMemoryPreview}
@@ -2222,10 +2130,21 @@ function App() {
               saving={savingMarkupMemory}
               rebuilding={rebuildingMarkupMemory}
               clearing={clearingMarkupMemory}
+              runningAIReview={runningAIReview}
+              creatingSample={creatingSample}
+              exportingPackage={exportingPackage}
+              importingPackage={importingPackage}
+              rollingBackBatchId={rollingBackBatchId}
               onRefresh={refreshMarkupMemory}
               onUpdateSettings={handleUpdateMarkupMemorySettings}
               onRebuild={handleRebuildMarkupMemory}
               onClear={handleClearMarkupMemory}
+              onRunAIReview={handleRunAIReview}
+              onRefreshReadiness={refreshReadiness}
+              onRollbackBatch={handleRollbackImportBatch}
+              onSampleProject={handleSampleProject}
+              onExportPackage={handleExportProjectPackage}
+              onImportPackage={handleImportProjectPackage}
             />
           ) : null}
         </div>
@@ -2245,7 +2164,10 @@ function App() {
             placementSummary={placementSummary}
             manualPlacementFindingId={manualPlacementFindingId}
             savingManualPlacement={savingManualPlacement}
+            savingFindingId={savingFindingId}
             onSelectFinding={handleSelectPdfMarkup}
+            onPatchFindingStatus={(finding, status) => handlePatchFinding(finding.id, { status })}
+            onSelectSheet={handleSelectSheet}
             onSaveManualPlacement={handleSaveManualPlacement}
             onStepSheet={handleStepSheet}
             onDeepDiveSheet={handleDeepDiveSheet}
@@ -2290,10 +2212,7 @@ interface ProjectsPanelProps {
   selectedProjectId: string | null;
   loading: boolean;
   uploading: boolean;
-  creatingSample: boolean;
   deletingProjectId: string | null;
-  exportingPackage: boolean;
-  importingPackage: boolean;
   showValidationProjects: boolean;
   taggingValidationProjects: boolean;
   cleaningValidationProjects: boolean;
@@ -2301,10 +2220,7 @@ interface ProjectsPanelProps {
   onRefresh: () => Promise<void>;
   onShowValidationProjectsChange: (value: boolean) => void;
   onUpload: (name: string, file: File) => Promise<void>;
-  onSampleProject: () => Promise<void>;
   onDeleteProject: (project: Project) => Promise<void>;
-  onExportPackage: () => Promise<void>;
-  onImportPackage: (file: File | null) => Promise<void>;
   onTagGeneratedValidationProjects: () => Promise<void>;
   onClearValidationProjects: () => Promise<void>;
 }
@@ -2391,6 +2307,65 @@ function MissedIssueAuditPromptPanel({
   );
 }
 
+function CurrentWorkSummary({
+  project,
+  sheet,
+  findings,
+  reviewProgress,
+  coverage,
+}: {
+  project: Project | null;
+  sheet: Sheet | null;
+  findings: Finding[];
+  reviewProgress: { total: number; remaining: number; resolved: number };
+  coverage: ReviewCoverageSummary | null;
+}) {
+  const acceptedCount = countFindingsByStatus(findings, "accepted");
+  const manualPlacementCount = findings.filter(
+    (finding) => finding.status === "accepted" && findingPlacementStatus(finding) === "manual_placement_needed",
+  ).length;
+  const exportReady = Boolean(project && acceptedCount > 0);
+  const finalReady = Boolean(
+    exportReady &&
+    coverage?.review_coverage_status === "complete" &&
+    manualPlacementCount === 0,
+  );
+  const exportReadiness = !project
+    ? "Select a project"
+    : finalReady
+      ? "Final-ready"
+      : exportReady
+        ? "Draft-ready"
+        : "Needs accepted findings";
+
+  return (
+    <section className="current-work-summary compact-section" aria-label="Current work summary">
+      <div className="section-inline-header">
+        <div>
+          <strong>Current work</strong>
+          <span>{project ? project.name : "No review selected"}</span>
+        </div>
+      </div>
+      <div className="current-work-grid">
+        <CurrentWorkMetric label="Sheet" value={sheet ? `P${sheet.page_number}` : "None"} detail={sheet ? sheet.drawing_number || sheet.sheet_title || "Untitled" : "Choose a sheet"} />
+        <CurrentWorkMetric label="Findings" value={String(findings.length)} detail={`${reviewProgress.remaining} left to review`} />
+        <CurrentWorkMetric label="Coverage" value={coverage ? `${coverage.review_coverage_percent}%` : "None"} detail={coverage ? formatStatus(coverage.review_coverage_status) : "not confirmed"} />
+        <CurrentWorkMetric label="Export readiness" value={exportReadiness} detail={manualPlacementCount ? `${manualPlacementCount} placement blocker${manualPlacementCount === 1 ? "" : "s"}` : `${acceptedCount} accepted`} />
+      </div>
+    </section>
+  );
+}
+
+function CurrentWorkMetric({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <div className="current-work-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
+  );
+}
+
 function WorkflowGuide({
   project,
   sheets,
@@ -2426,34 +2401,38 @@ function WorkflowGuide({
   const nextStep = steps.find((step) => step.status === "blocked" || step.status === "ready") ?? steps.find((step) => step.status === "waiting");
   return (
     <section className="workflow-guide compact-section" aria-label="What should I do next">
-      <div className="section-inline-header">
+      <div className="section-inline-header next-action-header">
         <div>
           <strong>What should I do next?</strong>
-          <span>{nextStep ? nextStep.detail : "Workflow is ready for final review records."}</span>
+          <span>{nextStep ? nextStep.label : "Workflow ready"}</span>
+          <small>{nextStep ? nextStep.detail : "Workflow is ready for final review records."}</small>
         </div>
         {nextStep?.onAction && nextStep.actionLabel ? (
-          <button className="secondary-button compact-action" type="button" onClick={nextStep.onAction}>
+          <button className="primary-button compact-action" type="button" onClick={nextStep.onAction}>
             <ChevronRight size={14} />
             {nextStep.actionLabel}
           </button>
         ) : null}
       </div>
-      <div className="workflow-stepper">
-        {steps.map((step) => (
-          <button
-            type="button"
-            className={`workflow-step status-${step.status}`}
-            key={step.label}
-            onClick={step.onAction}
-            disabled={!step.onAction}
-            title={step.detail}
-          >
-            {workflowStatusIcon(step.status)}
-            <span>{step.label}</span>
-            <small>{formatStatus(step.status)}</small>
-          </button>
-        ))}
-      </div>
+      <details className="workflow-step-details">
+        <summary>Workflow steps</summary>
+        <div className="workflow-stepper">
+          {steps.map((step) => (
+            <button
+              type="button"
+              className={`workflow-step status-${step.status}`}
+              key={step.label}
+              onClick={step.onAction}
+              disabled={!step.onAction}
+              title={step.detail}
+            >
+              {workflowStatusIcon(step.status)}
+              <span>{step.label}</span>
+              <small>{formatStatus(step.status)}</small>
+            </button>
+          ))}
+        </div>
+      </details>
     </section>
   );
 }
@@ -3141,7 +3120,7 @@ function workflowSteps(
     {
       label: "Upload PDF",
       status: project && sheets.length ? "done" : "ready",
-      detail: project && sheets.length ? `${sheets.length} sheets extracted.` : "Upload a PDF drawing package or create the sample package.",
+      detail: project && sheets.length ? `${sheets.length} sheets extracted.` : "Upload a PDF drawing package or create the sample project.",
       actionLabel: project && sheets.length ? undefined : "Open Projects",
       onAction: project && sheets.length ? undefined : actions.onOpenProjects,
     },
@@ -3301,7 +3280,7 @@ function recoveryCards(
       title: "Final export was blocked",
       message: String((latestFinalBlock.changes as Record<string, unknown> | undefined)?.reason ?? "Final export readiness was not complete."),
       dataState: "No final export was created from the blocked attempt.",
-      nextAction: "Open the export checklist and resolve the blocked item before trying again.",
+      nextAction: "Open the export requirements and resolve the blocked item before trying again.",
       actionLabel: "Open Export",
       onAction: actions.onOpenExport,
     });
@@ -3532,6 +3511,9 @@ function AuditLogPanel({ events }: { events: FindingEvent[] }) {
 
 interface AdvancedFeaturesPanelProps {
   project: Project | null;
+  batches: AIImportBatch[];
+  events: FindingEvent[];
+  readiness: ReadinessResponse | null;
   settings: MarkupMemorySettings | null;
   stats: MarkupMemoryStats | null;
   preview: MarkupMemoryPreview | null;
@@ -3539,14 +3521,28 @@ interface AdvancedFeaturesPanelProps {
   saving: boolean;
   rebuilding: boolean;
   clearing: boolean;
+  runningAIReview: boolean;
+  creatingSample: boolean;
+  exportingPackage: boolean;
+  importingPackage: boolean;
+  rollingBackBatchId: string | null;
   onRefresh: () => Promise<void>;
   onUpdateSettings: (update: MarkupMemorySettingsUpdate) => Promise<void>;
   onRebuild: () => Promise<void>;
   onClear: () => Promise<void>;
+  onRunAIReview: () => Promise<void>;
+  onRefreshReadiness: () => Promise<void>;
+  onRollbackBatch: (batch: AIImportBatch) => Promise<void>;
+  onSampleProject: () => Promise<void>;
+  onExportPackage: () => Promise<void>;
+  onImportPackage: (file: File | null) => Promise<void>;
 }
 
 function AdvancedFeaturesPanel({
   project,
+  batches,
+  events,
+  readiness,
   settings,
   stats,
   preview,
@@ -3554,10 +3550,21 @@ function AdvancedFeaturesPanel({
   saving,
   rebuilding,
   clearing,
+  runningAIReview,
+  creatingSample,
+  exportingPackage,
+  importingPackage,
+  rollingBackBatchId,
   onRefresh,
   onUpdateSettings,
   onRebuild,
   onClear,
+  onRunAIReview,
+  onRefreshReadiness,
+  onRollbackBatch,
+  onSampleProject,
+  onExportPackage,
+  onImportPackage,
 }: AdvancedFeaturesPanelProps) {
   const disabled = loading || saving || !settings;
   const categoryRows = Object.entries(stats?.examples_by_category ?? {}).slice(0, 6);
@@ -3573,6 +3580,75 @@ function AdvancedFeaturesPanel({
       </div>
 
       <div className="advanced-body">
+        <section className="advanced-section" aria-label="Advanced review tools">
+          <div className="advanced-section-header">
+            <div>
+              <strong>Power-user review tools</strong>
+              <span>Diagnostics and experimental workflows outside the normal MVP path</span>
+            </div>
+          </div>
+          <div className="button-row advanced-actions">
+            <button
+              className="secondary-button experimental-ai-action"
+              type="button"
+              disabled={!project || runningAIReview}
+              title="Experimental text-only review. The normal workflow remains Chat Prompt with the PDF attached."
+              onClick={() => void onRunAIReview()}
+            >
+              {runningAIReview ? <Sparkles size={16} className="spin" /> : <AlertTriangle size={16} />}
+              {runningAIReview ? "AI reviewing" : "Direct AI Text Only"}
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={creatingSample}
+              onClick={() => void onSampleProject()}
+              title="Create the built-in synthetic sample drawing package"
+            >
+              {creatingSample ? <Loader2 size={16} className="spin" /> : <FolderOpen size={16} />}
+              Sample Project
+            </button>
+          </div>
+          <ReadinessPanel readiness={readiness} onRefresh={onRefreshReadiness} />
+          <AIImportHistory batches={batches} rollingBackBatchId={rollingBackBatchId} onRollbackBatch={onRollbackBatch} />
+          <AuditLogPanel events={events} />
+        </section>
+
+        <section className="advanced-section" aria-label="Project package backup and restore">
+          <div className="advanced-section-header">
+            <div>
+              <strong>Backup / Restore</strong>
+              <span>Portable AutoQC project packages for power users</span>
+            </div>
+          </div>
+          <div className="package-tools">
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={!project || exportingPackage}
+              onClick={() => void onExportPackage()}
+              title="Export this project's metadata, AI findings, audit history, and safe local files"
+            >
+              {exportingPackage ? <Loader2 size={16} className="spin" /> : <Archive size={16} />}
+              Export Project Package
+            </button>
+            <label className="secondary-button file-import-button" title="Import a portable AutoQC project package zip">
+              {importingPackage ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}
+              Import Project Package
+              <input
+                type="file"
+                accept="application/zip,.zip"
+                aria-label="Import AutoQC project package"
+                disabled={importingPackage}
+                onChange={(event) => {
+                  void onImportPackage(event.target.files?.[0] ?? null);
+                  event.target.value = "";
+                }}
+              />
+            </label>
+          </div>
+        </section>
+
         <section className="advanced-section" aria-label="Markup Memory settings">
           <div className="advanced-section-header">
             <div>
@@ -3814,14 +3890,13 @@ function HelpDialog({ onClose, onOpenAdvanced }: { onClose: () => void; onOpenAd
           </button>
         </div>
         <ol className="help-steps">
-          <li>Upload PDF or create the sample project.</li>
+          <li>Upload PDF.</li>
           <li>Generate Chat Prompt.</li>
           <li>Attach the same PDF in ChatGPT or Copilot.</li>
           <li>Paste the returned JSON into AutoQC.</li>
-          <li>Preview/import valid updates.</li>
-          <li>Review, accept, reject, edit, merge, or defer findings.</li>
-          <li>Recalculate placement if needed.</li>
-          <li>Export the marked PDF and review package.</li>
+          <li>Preview and import valid updates.</li>
+          <li>Review findings and accept, reject, or edit them.</li>
+          <li>Export the marked PDF.</li>
         </ol>
         <div className="inline-warning">
           AutoQC is a workflow aid, not engineering authority. Final judgment remains with the responsible reviewer, and the prompt alone is not the drawing source of truth.
@@ -3842,10 +3917,7 @@ function ProjectsPanel({
   selectedProjectId,
   loading,
   uploading,
-  creatingSample,
   deletingProjectId,
-  exportingPackage,
-  importingPackage,
   showValidationProjects,
   taggingValidationProjects,
   cleaningValidationProjects,
@@ -3853,10 +3925,7 @@ function ProjectsPanel({
   onRefresh,
   onShowValidationProjectsChange,
   onUpload,
-  onSampleProject,
   onDeleteProject,
-  onExportPackage,
-  onImportPackage,
   onTagGeneratedValidationProjects,
   onClearValidationProjects,
 }: ProjectsPanelProps) {
@@ -3911,7 +3980,7 @@ function ProjectsPanel({
       <details className="collapsible-section upload-collapsible" open={!selectedProjectId || projects.length === 0}>
         <summary>
           <span>
-            <strong>Upload / sample package</strong>
+            <strong>Upload PDF</strong>
             <small>{selectedProjectId ? "Collapsed after a project is selected" : "Start a new review"}</small>
           </span>
         </summary>
@@ -3949,7 +4018,7 @@ function ProjectsPanel({
           ) : null}
 
           {uploadAssessment.warnings.length ? (
-            <div className="risk-checklist" role="status" aria-label="Upload cautions">
+            <div className="risk-list" role="status" aria-label="Upload cautions">
               {uploadAssessment.warnings.map((warning) => (
                 <span key={`${warning.title}-${warning.detail}`}>
                   <AlertTriangle size={13} />
@@ -3970,53 +4039,8 @@ function ProjectsPanel({
               {uploading ? <Loader2 size={17} className="spin" /> : <Upload size={17} />}
               Upload
             </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() => void onSampleProject()}
-              disabled={creatingSample}
-              title="Create the built-in synthetic sample drawing package and extract sheet context"
-            >
-              {creatingSample ? <Loader2 size={17} className="spin" /> : <FolderOpen size={17} />}
-              Sample Package
-            </button>
           </div>
         </form>
-      </details>
-
-      <details className="collapsible-section package-collapsible">
-        <summary>
-          <span>
-            <strong>Backup / restore</strong>
-            <small>Portable AutoQC project packages</small>
-          </span>
-        </summary>
-        <div className="package-tools">
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!selectedProjectId || exportingPackage}
-            onClick={() => void onExportPackage()}
-            title="Export this project's metadata, AI findings, audit history, and safe local files"
-          >
-            {exportingPackage ? <Loader2 size={16} className="spin" /> : <Archive size={16} />}
-            Export Project Package
-          </button>
-          <label className="secondary-button file-import-button" title="Import a portable AutoQC project package zip">
-            {importingPackage ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}
-            Import Project Package
-            <input
-              type="file"
-              accept="application/zip,.zip"
-              aria-label="Import AutoQC project package"
-              disabled={importingPackage}
-              onChange={(event) => {
-                void onImportPackage(event.target.files?.[0] ?? null);
-                event.target.value = "";
-              }}
-            />
-          </label>
-        </div>
       </details>
 
       <div className="project-list" aria-label="Project list">
@@ -4059,7 +4083,7 @@ function ProjectsPanel({
           <div className="empty-state compact">
             <FileText size={18} />
             <strong>No projects yet</strong>
-            <small>{showValidationProjects ? "Upload a PDF drawing set or create the sample package to start the AutoQC workflow." : "Upload a PDF drawing set, create the sample package, or show generated validation projects."}</small>
+            <small>{showValidationProjects ? "Upload a PDF drawing set or create the sample project to start the AutoQC workflow." : "Upload a PDF drawing set, create the sample project, or show generated validation projects."}</small>
           </div>
         ) : (
           projects.map((project) => {
@@ -4105,74 +4129,6 @@ function ProjectsPanel({
   );
 }
 
-interface SheetsPanelProps {
-  sheets: Sheet[];
-  findings: Finding[];
-  selectedSheetId: string | null;
-  disabled: boolean;
-  onSelectSheet: (sheetId: string) => void;
-}
-
-function SheetsPanel({
-  sheets,
-  findings,
-  selectedSheetId,
-  disabled,
-  onSelectSheet,
-}: SheetsPanelProps) {
-  return (
-    <section className="panel sheets-panel" id="sheet-index" aria-label="Sheet package index">
-      <div className="panel-header">
-        <div>
-          <span className="eyebrow">Sheets</span>
-          <h2>Package Index</h2>
-        </div>
-        <span className="count-pill">{sheets.length}</span>
-      </div>
-
-      {disabled ? (
-        <div className="empty-state compact">
-          <FileText size={18} />
-          <strong>No project selected</strong>
-          <small>Select or upload a drawing review before browsing sheets.</small>
-        </div>
-      ) : sheets.length === 0 ? (
-        <div className="empty-state compact">
-          <FileText size={18} />
-          <strong>No sheets returned</strong>
-          <small>The backend did not extract sheet pages for this project. Try refreshing or re-uploading the PDF.</small>
-        </div>
-      ) : (
-        <div className="sheet-list" aria-label="Sheet list">
-          {sheets.map((sheet) => {
-            const count = findings.filter((finding) => findingMatchesSheet(finding, sheet)).length;
-
-            return (
-              <button
-                className={`sheet-item ${sheet.id === selectedSheetId ? "selected" : ""}`}
-                type="button"
-                key={sheet.id}
-                onClick={() => onSelectSheet(sheet.id)}
-                title={`Preview ${sheet.drawing_number || `Sheet ${sheet.page_number}`} and show its related findings`}
-              >
-                <span className="sheet-page">P{sheet.page_number}</span>
-                <span className="sheet-main">
-                  <strong>{sheet.drawing_number || `Sheet ${sheet.page_number}`}</strong>
-                  <span>{sheet.sheet_title || "Untitled sheet"}</span>
-                </span>
-                <span className="sheet-tags">
-                  <span className="type-chip">{sheet.sheet_type || "unknown"}</span>
-                  {count > 0 ? <span className="finding-count">{count}</span> : null}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </section>
-  );
-}
-
 interface ViewerProps {
   project: Project | null;
   sheet: Sheet | null;
@@ -4185,7 +4141,10 @@ interface ViewerProps {
   placementSummary: PlacementSummary | null;
   manualPlacementFindingId: string | null;
   savingManualPlacement: boolean;
+  savingFindingId: string | null;
   onSelectFinding: (finding: Finding) => void;
+  onPatchFindingStatus: (finding: Finding, status: FindingStatus) => Promise<void>;
+  onSelectSheet: (sheetId: string) => void;
   onSaveManualPlacement: (finding: Finding, pageNumber: number, rect: number[], imageWidth: number, imageHeight: number) => Promise<void>;
   onStepSheet: (delta: number) => void;
   onDeepDiveSheet: (sheet?: Sheet | null) => void;
@@ -4214,7 +4173,10 @@ function Viewer({
   placementSummary,
   manualPlacementFindingId,
   savingManualPlacement,
+  savingFindingId,
   onSelectFinding,
+  onPatchFindingStatus,
+  onSelectSheet,
   onSaveManualPlacement,
   onStepSheet,
   onDeepDiveSheet,
@@ -4394,6 +4356,23 @@ function Viewer({
   const zoomPercent = Math.round(zoom * 100);
   const canZoomOut = zoom > minZoom;
   const canZoomIn = zoom < maxZoom;
+  const selectedFindingIssueText = selectedFindingOnSheet
+    ? selectedFindingOnSheet.reasoning_summary.trim() ||
+      selectedFindingOnSheet.comment_text.trim() ||
+      selectedFindingOnSheet.suggested_correction.trim() ||
+      "No issue description is saved for this finding yet."
+    : "";
+  const selectedFindingCorrectionText = selectedFindingOnSheet?.suggested_correction.trim() || "";
+  const selectedFindingCommentText = selectedFindingOnSheet?.comment_text.trim() || "";
+  const selectedFindingSecondaryText =
+    selectedFindingCorrectionText && selectedFindingCorrectionText !== selectedFindingIssueText
+      ? selectedFindingCorrectionText
+      : selectedFindingCommentText && selectedFindingCommentText !== selectedFindingIssueText
+        ? selectedFindingCommentText
+        : "";
+  const selectedFindingSecondaryLabel = selectedFindingSecondaryText === selectedFindingCorrectionText
+    ? "Suggested fix"
+    : "PDF comment";
 
   function getFitZoom() {
     if (!imageSize || !panViewportRef.current) {
@@ -4725,7 +4704,52 @@ function Viewer({
         </div>
 
         <div className="viewer-actions">
-          <div className="viewer-mode-toggle" role="tablist" aria-label="Viewer mode">
+          <div className="viewer-control-group viewer-navigation-group" aria-label="Sheet navigation">
+            <label className="viewer-sheet-jump" title="Jump to another extracted drawing sheet">
+              <span>Sheet</span>
+              <select
+                aria-label="Jump to sheet"
+                value={sheet?.id ?? ""}
+                disabled={sheets.length === 0}
+                onChange={(event) => {
+                  if (event.target.value) {
+                    onSelectSheet(event.target.value);
+                  }
+                }}
+              >
+                {sheets.length === 0 ? (
+                  <option value="">No sheets</option>
+                ) : (
+                  sheets.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      P{candidate.page_number} {candidate.drawing_number || candidate.sheet_title || "Untitled"}
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => onStepSheet(-1)}
+              disabled={!canGoPrev}
+              title="Show the previous drawing sheet in this package"
+              aria-label="Previous sheet"
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => onStepSheet(1)}
+              disabled={!canGoNext}
+              title="Show the next drawing sheet in this package"
+              aria-label="Next sheet"
+            >
+              <ChevronRight size={18} />
+            </button>
+          </div>
+          <div className="viewer-control-group viewer-mode-toggle" role="tablist" aria-label="Viewer mode">
             <button
               className={activeViewerMode === "focus" ? "active" : ""}
               type="button"
@@ -4758,7 +4782,7 @@ function Viewer({
               Marked PDF
             </button>
           </div>
-          <div className="zoom-controls" aria-label="Drawing zoom controls">
+          <div className="viewer-control-group zoom-controls" aria-label="Drawing zoom controls">
             <button className="icon-button" type="button" onClick={() => changeZoom(-0.15)} disabled={!imageUrl || !canZoomOut} title="Zoom out" aria-label="Zoom out">
               <ZoomOut size={17} />
             </button>
@@ -4785,28 +4809,16 @@ function Viewer({
               <Sparkles size={16} />
             </button>
           </div>
-          <button
-            className="icon-button"
-            type="button"
-            onClick={() => onStepSheet(-1)}
-            disabled={!canGoPrev}
-            title="Show the previous drawing sheet in this package"
-            aria-label="Previous sheet"
-          >
-            <ChevronLeft size={18} />
-          </button>
-          <button
-            className="icon-button"
-            type="button"
-            onClick={() => onStepSheet(1)}
-            disabled={!canGoNext}
-            title="Show the next drawing sheet in this package"
-            aria-label="Next sheet"
-          >
-            <ChevronRight size={18} />
-          </button>
         </div>
       </div>
+
+      {manualPlacementTarget ? (
+        <div className="manual-placement-banner" role="status">
+          <Maximize2 size={15} />
+          <strong>Manual placement active</strong>
+          <span>Drag a rectangle on the drawing. Press Escape to cancel.</span>
+        </div>
+      ) : null}
 
       {(placementMessage || placementSummary || savingManualPlacement) ? (
         <div className="viewer-placement-summary" role="status">
@@ -4826,7 +4838,7 @@ function Viewer({
           <div className="empty-state">
             <FolderOpen size={26} />
             <strong>No project selected</strong>
-            <small>Choose a review from Projects, upload a PDF, or create the sample package to begin.</small>
+            <small>Choose a review from Projects, upload a PDF, or create the sample project to begin.</small>
           </div>
         ) : !sheet ? (
           <div className="empty-state">
@@ -4844,7 +4856,7 @@ function Viewer({
           </div>
         ) : imageUrl && !imageFailed ? (
           <div
-            className="drawing-pan-viewport"
+            className={`drawing-pan-viewport ${manualPlacementTarget ? "manual-placement-active" : ""}`}
             ref={panViewportRef}
             aria-label="Scrollable drawing preview. Use the zoom controls, mouse wheel, trackpad pinch, or touch gestures to zoom and pan."
             onWheel={handlePanWheel}
@@ -4925,6 +4937,64 @@ function Viewer({
           </div>
         )}
 
+        {selectedFindingOnSheet ? (
+          <section className="viewer-selected-finding-bar" aria-label="Selected finding quick actions" aria-live="polite">
+            <span className={`severity-dot severity-${severityClass(selectedFindingOnSheet.severity)}`} />
+            <div className="viewer-selected-finding-main">
+              <div className="viewer-selected-finding-title-row">
+                <strong>{selectedFindingOnSheet.title}</strong>
+                <span className={`status-chip status-${statusClass(selectedFindingOnSheet.status)}`}>
+                  {formatStatus(selectedFindingOnSheet.status)}
+                </span>
+              </div>
+              <dl className="viewer-selected-finding-details">
+                <div>
+                  <dt>Issue</dt>
+                  <dd>{selectedFindingIssueText}</dd>
+                </div>
+                {selectedFindingSecondaryText ? (
+                  <div>
+                    <dt>{selectedFindingSecondaryLabel}</dt>
+                    <dd>{selectedFindingSecondaryText}</dd>
+                  </div>
+                ) : null}
+              </dl>
+            </div>
+            <div className="viewer-selected-finding-actions">
+              <button
+                className="primary-button compact-action"
+                type="button"
+                disabled={savingFindingId === selectedFindingOnSheet.id}
+                onClick={() => void onPatchFindingStatus(selectedFindingOnSheet, "accepted")}
+                title="Accept this selected PDF markup finding"
+              >
+                {savingFindingId === selectedFindingOnSheet.id ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
+                Accept
+              </button>
+              <button
+                className="secondary-button compact-action"
+                type="button"
+                disabled={savingFindingId === selectedFindingOnSheet.id}
+                onClick={() => void onPatchFindingStatus(selectedFindingOnSheet, "needs_review")}
+                title="Keep this selected PDF markup finding in review"
+              >
+                <ClipboardCheck size={14} />
+                Review
+              </button>
+              <button
+                className="secondary-button compact-action"
+                type="button"
+                disabled={savingFindingId === selectedFindingOnSheet.id}
+                onClick={() => void onPatchFindingStatus(selectedFindingOnSheet, "rejected")}
+                title="Reject this selected PDF markup finding"
+              >
+                <X size={14} />
+                Reject
+              </button>
+            </div>
+          </section>
+        ) : null}
+
       </div>
 
       {sheet?.text_content ? (
@@ -4993,18 +5063,6 @@ function FindingsPanel({
   }, [findings, query, statusFilter, placementFilter]);
 
   const hasActiveFindingFilters = statusFilter !== "all" || placementFilter !== "all" || query.trim().length > 0;
-  const qualityCounts = {
-    exact: findings.filter((finding) => findingPlacementStatus(finding) === "exact_target_found").length,
-    fuzzy: findings.filter((finding) => findingPlacementStatus(finding) === "fuzzy_target_found").length,
-    page: findings.filter((finding) => findingPlacementStatus(finding) === "page_level_fallback").length,
-    manual: findings.filter((finding) => findingPlacementStatus(finding) === "manual_placement_needed").length,
-    lowConfidence: findings.filter((finding) => finding.confidence < 0.6).length,
-    accepted: countFindingsByStatus(findings, "accepted"),
-    needsReview: countFindingsByStatus(findings, "needs_review"),
-    rejected: countFindingsByStatus(findings, "rejected"),
-    duplicate: countFindingsByStatus(findings, "duplicate"),
-  };
-
   useEffect(() => {
     if (!scrollFindingId || filteredFindings.every((finding) => finding.id !== scrollFindingId)) {
       return;
@@ -5026,7 +5084,7 @@ function FindingsPanel({
       </div>
 
       <div className="status-summary">
-        {STATUSES.map((status) => (
+        {PRIMARY_FINDING_STATUSES.map((status) => (
           <StatusCounter key={status} label={formatStatus(status)} value={countFindingsByStatus(findings, status)} />
         ))}
       </div>
@@ -5042,26 +5100,7 @@ function FindingsPanel({
         </label>
       </div>
 
-      <div className="finding-quality-dashboard" aria-label="Finding Quality and Placement dashboard">
-        <button type="button" onClick={() => setPlacementFilter("exact")}>Exact placed findings <strong>{qualityCounts.exact}</strong></button>
-        <button type="button" onClick={() => setPlacementFilter("fuzzy")}>Fuzzy placed findings <strong>{qualityCounts.fuzzy}</strong></button>
-        <button type="button" onClick={() => setPlacementFilter("page_level")}>Page-level findings <strong>{qualityCounts.page}</strong></button>
-        <button type="button" onClick={() => setPlacementFilter("manual")}>Manual placement needed <strong>{qualityCounts.manual}</strong></button>
-        <button type="button" onClick={() => setPlacementFilter("low_confidence")}>Low confidence findings <strong>{qualityCounts.lowConfidence}</strong></button>
-        <button type="button" onClick={() => setStatusFilter("accepted")}>Accepted <strong>{qualityCounts.accepted}</strong></button>
-        <button type="button" onClick={() => setStatusFilter("needs_review")}>Needs review <strong>{qualityCounts.needsReview}</strong></button>
-        <button type="button" onClick={() => setStatusFilter("duplicate")}>Duplicate/merged <strong>{qualityCounts.duplicate}</strong></button>
-      </div>
-
-      <div className="shortcut-hints" aria-label="Reviewer keyboard shortcuts">
-        <span><kbd>A</kbd> Accept</span>
-        <span><kbd>X</kbd> Reject</span>
-        <span><kbd>R</kbd> Review</span>
-        <span><kbd>J/K</kbd> Finding</span>
-        <span><kbd>[ ]</kbd> Sheet</span>
-      </div>
-
-      <div className="finding-tools">
+      <div className="finding-tools primary-finding-tools">
         <div className="search-field">
           <Search size={16} />
           <input
@@ -5074,7 +5113,7 @@ function FindingsPanel({
         </div>
 
         <div className="segmented-control" aria-label="Finding status filter">
-          {(["all", ...STATUSES] as StatusFilter[]).map((status) => (
+          {(["all", ...PRIMARY_FINDING_STATUSES] as StatusFilter[]).map((status) => (
             <button
               type="button"
               key={status}
@@ -5086,7 +5125,22 @@ function FindingsPanel({
             </button>
           ))}
         </div>
+      </div>
 
+      <details className="collapsible-section finding-secondary-controls">
+        <summary>
+          <span>
+            <strong>Filters and bulk actions</strong>
+            <small>{filteredFindings.length} in view. Shortcuts and placement filters live here.</small>
+          </span>
+        </summary>
+        <div className="shortcut-hints" aria-label="Reviewer keyboard shortcuts">
+          <span><kbd>A</kbd> Accept</span>
+          <span><kbd>X</kbd> Reject</span>
+          <span><kbd>R</kbd> Review</span>
+          <span><kbd>J/K</kbd> Finding</span>
+          <span><kbd>[ ]</kbd> Sheet</span>
+        </div>
         <div className="segmented-control placement-filter" aria-label="Finding placement filter">
           {(["all", "located", "exact", "fuzzy", "page_level", "manual", "low_confidence"] as PlacementFilter[]).map((placement) => (
             <button
@@ -5100,38 +5154,38 @@ function FindingsPanel({
             </button>
           ))}
         </div>
-      </div>
 
-      <div className="bulk-actions" aria-label="Bulk finding actions">
-        <span>{filteredFindings.length} in view</span>
-        <button
-          className="secondary-button"
-          type="button"
-          disabled={filteredFindings.length === 0}
-          onClick={() => void onBulkPatchFindings(filteredFindings, { status: "accepted" })}
-          title="Mark all currently filtered findings as accepted"
-        >
-          Accept view
-        </button>
-        <button
-          className="secondary-button"
-          type="button"
-          disabled={filteredFindings.length === 0}
-          onClick={() => void onBulkPatchFindings(filteredFindings, { status: "needs_review" })}
-          title="Return all currently filtered findings to needs review"
-        >
-          Review view
-        </button>
-        <button
-          className="secondary-button"
-          type="button"
-          disabled={filteredFindings.length === 0}
-          onClick={() => void onBulkPatchFindings(filteredFindings, { status: "rejected" })}
-          title="Mark all currently filtered findings as rejected or not applicable"
-        >
-          Reject view
-        </button>
-      </div>
+        <div className="bulk-actions" aria-label="Bulk finding actions">
+          <span>{filteredFindings.length} in view</span>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={filteredFindings.length === 0}
+            onClick={() => void onBulkPatchFindings(filteredFindings, { status: "accepted" })}
+            title="Mark all currently filtered findings as accepted"
+          >
+            Accept view
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={filteredFindings.length === 0}
+            onClick={() => void onBulkPatchFindings(filteredFindings, { status: "needs_review" })}
+            title="Return all currently filtered findings to needs review"
+          >
+            Review view
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={filteredFindings.length === 0}
+            onClick={() => void onBulkPatchFindings(filteredFindings, { status: "rejected" })}
+            title="Mark all currently filtered findings as rejected or not applicable"
+          >
+            Reject view
+          </button>
+        </div>
+      </details>
 
       <div className="finding-list" aria-label="Finding list">
         {!selectedProject ? (
@@ -5362,7 +5416,7 @@ function FindingInspector({
               setDraft((current) => ({ ...current, status: event.target.value as FindingStatus }))
             }
           >
-            {STATUSES.map((status) => (
+            {PRIMARY_FINDING_STATUSES.map((status) => (
               <option key={status} value={status}>
                 {formatStatus(status)}
               </option>
@@ -5572,6 +5626,7 @@ function FindingInspector({
         ) : null}
       </details>
 
+      {(finding.duplicate_of || finding.status === "duplicate") ? (
       <details className="collapsible-section inspector-collapsible">
         <summary>
           <span>
@@ -5627,6 +5682,7 @@ function FindingInspector({
           </button>
         </div>
       </details>
+      ) : null}
 
       {titleIsMissing || commentIsMissing ? (
         <div className="inline-warning" role="alert">
@@ -5689,203 +5745,6 @@ function FindingInspector({
   );
 }
 
-interface ChecklistPanelProps {
-  project: Project | null;
-  templates: ChecklistTemplate[];
-  checklist: ProjectChecklist | null;
-  findings: Finding[];
-  loading: boolean;
-  savingItemId: string | null;
-  onRefresh: () => Promise<void>;
-  onSelectChecklist: (checklistId: string) => Promise<void>;
-  onUpdateItem: (item: ChecklistItem, update: ChecklistItemUpdate) => Promise<void>;
-  onSelectFinding: (finding: Finding) => void;
-}
-
-function ChecklistPanel({
-  project,
-  templates,
-  checklist,
-  findings,
-  loading,
-  savingItemId,
-  onRefresh,
-  onSelectChecklist,
-  onUpdateItem,
-  onSelectFinding,
-}: ChecklistPanelProps) {
-  const [sectionFilter, setSectionFilter] = useState("All");
-  const sections = ["All", ...Array.from(new Set((checklist?.items ?? []).map((item) => item.section)))];
-  const visibleItems = (checklist?.items ?? []).filter((item) => sectionFilter === "All" || item.section === sectionFilter);
-  const progress = checklist?.progress ?? computeChecklistProgress(checklist?.items ?? []);
-
-  return (
-    <section className="panel checklist-panel" aria-label="Checklist tracker">
-      <div className="panel-header">
-        <div>
-          <span className="eyebrow">Checklist</span>
-          <h2>Coverage Tracker</h2>
-        </div>
-        <button className="icon-button" type="button" onClick={() => void onRefresh()} title="Refresh checklist">
-          <RefreshCw size={16} className={loading ? "spin" : ""} />
-        </button>
-      </div>
-
-      <div className="checklist-body">
-        <div className="inline-helper">
-          Checklist items track review coverage and link evidence/findings. They do not create drawing findings by themselves.
-        </div>
-
-        {!project ? (
-          <div className="empty-state compact">
-            <FolderOpen size={18} />
-            <strong>No project selected</strong>
-            <small>Select a drawing package before choosing a checklist.</small>
-          </div>
-        ) : !checklist?.items?.length ? (
-          <div className="checklist-select-card">
-            <label className="field-label">
-              Select checklist for project
-              <select
-                defaultValue=""
-                disabled={loading || templates.length === 0}
-                onChange={(event) => {
-                  if (event.target.value) {
-                    void onSelectChecklist(event.target.value);
-                  }
-                }}
-              >
-                <option value="">Choose checklist</option>
-                {templates.map((template) => (
-                  <option key={template.id} value={template.id}>
-                    {template.name} {template.version}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <small>{templates[0]?.description ?? "Checklist templates are stored locally."}</small>
-          </div>
-        ) : (
-          <>
-            <div className="checklist-progress" role="status">
-              <strong>{progress.percent_complete}% complete</strong>
-              <span>{progress.completed_items}/{progress.total_items} checked | {progress.issue_items} issue items | {progress.linked_items} linked</span>
-              <progress value={progress.completed_items} max={Math.max(progress.total_items, 1)} />
-            </div>
-
-            <div className="segmented-control checklist-sections" aria-label="Checklist section filter">
-              {sections.map((section) => (
-                <button
-                  type="button"
-                  key={section}
-                  className={sectionFilter === section ? "active" : ""}
-                  onClick={() => setSectionFilter(section)}
-                  title={`Show ${section} checklist items`}
-                >
-                  {section}
-                </button>
-              ))}
-            </div>
-
-            <div className="checklist-item-list">
-              {visibleItems.map((item) => (
-                <ChecklistItemRow
-                  key={item.id}
-                  item={item}
-                  findings={findings}
-                  saving={savingItemId === item.id}
-                  onUpdate={onUpdateItem}
-                  onSelectFinding={onSelectFinding}
-                />
-              ))}
-            </div>
-          </>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function ChecklistItemRow({
-  item,
-  findings,
-  saving,
-  onUpdate,
-  onSelectFinding,
-}: {
-  item: ChecklistItem;
-  findings: Finding[];
-  saving: boolean;
-  onUpdate: (item: ChecklistItem, update: ChecklistItemUpdate) => Promise<void>;
-  onSelectFinding: (finding: Finding) => void;
-}) {
-  const linkedFindings = findings.filter((finding) => item.mapped_finding_ids.includes(finding.id));
-  return (
-    <div className="checklist-item-row">
-      <div className="checklist-item-main">
-        <span className={`status-chip status-${statusClass(item.status)}`}>{checklistStatusLabel(item.status)}</span>
-        <strong>{item.item_text}</strong>
-        <small>{item.section} | {item.sheet_type || "all sheets"} | {item.source_template_reference || "local checklist"}</small>
-      </div>
-      <label className="field-label">
-        Status
-        <select
-          value={item.status}
-          disabled={saving}
-          onChange={(event) => void onUpdate(item, { status: event.target.value as ChecklistStatus })}
-        >
-          <option value="not_started">Not started</option>
-          <option value="checked">Checked</option>
-          <option value="issue_found">Issue found</option>
-          <option value="not_applicable">Not applicable</option>
-          <option value="needs_human_review">Needs human review</option>
-        </select>
-      </label>
-      <label className="field-label">
-        Link existing finding
-        <select
-          value=""
-          disabled={saving || findings.length === 0}
-          onChange={(event) => {
-            const findingId = event.target.value;
-            if (findingId && !item.mapped_finding_ids.includes(findingId)) {
-              void onUpdate(item, { mapped_finding_ids: [...item.mapped_finding_ids, findingId] });
-            }
-          }}
-        >
-          <option value="">Choose finding</option>
-          {findings.map((finding) => (
-            <option key={finding.id} value={finding.id}>
-              {finding.title}
-            </option>
-          ))}
-        </select>
-      </label>
-      {linkedFindings.length ? (
-        <div className="linked-finding-list">
-          {linkedFindings.map((finding) => (
-            <button type="button" key={finding.id} onClick={() => onSelectFinding(finding)}>
-              {finding.title}
-            </button>
-          ))}
-        </div>
-      ) : null}
-      <label className="field-label">
-        Reviewer notes
-        <textarea
-          rows={2}
-          defaultValue={item.reviewer_notes ?? ""}
-          onBlur={(event) => {
-            if (event.currentTarget.value !== (item.reviewer_notes ?? "")) {
-              void onUpdate(item, { reviewer_notes: event.currentTarget.value });
-            }
-          }}
-        />
-      </label>
-    </div>
-  );
-}
-
 interface ExportPanelProps {
   project: Project | null;
   findings: Finding[];
@@ -5924,7 +5783,7 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
     setError(null);
     setExportOperation({
       id: `${Date.now()}-export`,
-      title: exportMode === "final" ? "Create Final Export" : "Create Draft Export",
+      title: exportMode === "final" ? "Export Final Marked PDF" : "Export Draft Marked PDF",
       status: "active",
       steps: exportMode === "final"
         ? ["Checking readiness", "Writing marked PDF", "Validating PDF", "Writing reports"]
@@ -5988,7 +5847,7 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
         : reviewerNameIssue
           ? reviewerNameIssue
         : exportMode === "final" && !finalReady
-          ? "Complete the final export readiness checklist first"
+          ? "Complete the final export readiness requirements first"
         : "Generate marked PDF, logs, and summaries for the selected finding statuses";
   const markedPdfHref = resolveAssetUrl(result?.marked_pdf);
   const qaReportHref = resolveAssetUrl(result?.qa_report ?? result?.csv_log);
@@ -5999,10 +5858,22 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
       <div className="panel-header">
         <div>
           <span className="eyebrow">Export</span>
-          <h2>Review Package</h2>
+          <h2>Marked PDF</h2>
         </div>
         <Download size={18} />
       </div>
+
+      <div className="export-helper" role="status">
+        Default: export accepted findings to a marked PDF. Use advanced options only when you need draft/final controls or a different status set.
+      </div>
+
+      <details className="collapsible-section advanced-export-options">
+        <summary>
+          <span>
+            <strong>Advanced export options</strong>
+            <small>Statuses, draft/final mode, reviewer signoff, generated files, and audit activity</small>
+          </span>
+        </summary>
 
       <div className="segmented-control export-mode-control" role="radiogroup" aria-label="Export mode">
         <button
@@ -6064,7 +5935,7 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
       </div>
 
       {exportMode === "final" ? (
-        <div className="final-readiness-checklist" aria-label="Final export readiness checklist">
+        <div className="final-readiness-requirements" aria-label="Final export readiness requirements">
           <strong>Final export readiness</strong>
           <span className={finalCoverageReady ? "done" : "blocked"}><Check size={13} /> Review coverage {reviewCoverage ? `${formatStatus(reviewCoverage.review_coverage_status)} ${reviewCoverage.review_coverage_percent}%` : "not confirmed"}</span>
           <span className={effectiveFindingCount > 0 ? "done" : "blocked"}><Check size={13} /> Accepted findings selected</span>
@@ -6088,6 +5959,7 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
           </label>
         </div>
       ) : null}
+      </details>
 
       {exportOperation ? <OperationProgressPanel operation={exportOperation} onDismiss={exportOperation.status === "active" ? undefined : () => setExportOperation(null)} /> : null}
 
@@ -6105,7 +5977,7 @@ function ExportPanel({ project, findings, events, onExportComplete }: ExportPane
         title={exportTitle}
       >
         {exporting ? <Loader2 size={17} className="spin" /> : <Download size={17} />}
-        {exportMode === "final" ? "Create Final Export" : "Create Draft Export"}
+        {exporting ? "Exporting Marked PDF" : "Export Marked PDF"}
       </button>
 
       {error ? <div className="inline-error" role="alert">{error}</div> : null}
@@ -6527,22 +6399,6 @@ function computePlacementSummary(findings: Finding[]): PlacementSummary {
   return summary;
 }
 
-function computeChecklistProgress(items: ChecklistItem[]) {
-  const by_status: Record<string, number> = {};
-  for (const item of items) {
-    by_status[item.status] = (by_status[item.status] ?? 0) + 1;
-  }
-  const completed_items = (by_status.checked ?? 0) + (by_status.issue_found ?? 0) + (by_status.not_applicable ?? 0);
-  return {
-    total_items: items.length,
-    completed_items,
-    issue_items: by_status.issue_found ?? 0,
-    linked_items: items.filter((item) => item.mapped_finding_ids.length > 0).length,
-    percent_complete: items.length ? Math.round((completed_items / items.length) * 1000) / 10 : 0,
-    by_status,
-  };
-}
-
 function placementQualityLabel(status: string): string {
   return {
     exact_target_found: "Exact target found",
@@ -6564,16 +6420,6 @@ function validationStatusLabel(status: string): string {
     return "Failed";
   }
   return formatStatus(status);
-}
-
-function checklistStatusLabel(status: ChecklistStatus): string {
-  return {
-    not_started: "Not started",
-    checked: "Checked",
-    issue_found: "Issue found",
-    not_applicable: "Not applicable",
-    needs_human_review: "Needs human review",
-  }[status];
 }
 
 function placementSummaryText(summary: PlacementSummary): string {
@@ -6617,17 +6463,58 @@ function auditChangeSummary(changes: Record<string, unknown>): string {
     .map(([key, value]) => {
       if (typeof value === "object" && value && "from" in value && "to" in value) {
         const typed = value as { from?: unknown; to?: unknown };
-        return `${key}: ${String(typed.from ?? "")} -> ${String(typed.to ?? "")}`;
+        return `${key}: ${auditChangeValueSummary(key, typed.from)} -> ${auditChangeValueSummary(key, typed.to)}`;
       }
       if (Array.isArray(value)) {
         return `${key}: ${value.length} item${value.length === 1 ? "" : "s"}`;
       }
       if (typeof value === "object" && value) {
-        return `${key}: ${JSON.stringify(value)}`;
+        return `${key}: ${JSON.stringify(sanitizeAuditObject(value as Record<string, unknown>))}`;
       }
-      return `${key}: ${String(value ?? "")}`;
+      return `${key}: ${auditChangeValueSummary(key, value)}`;
     });
   return parts.join(" | ");
+}
+
+function auditChangeValueSummary(key: string, value: unknown): string {
+  if (typeof value !== "string") {
+    return String(value ?? "");
+  }
+  if (!looksLikeLocalPathKey(key) && !looksLikeLocalPath(value)) {
+    return value;
+  }
+  const parts = value.split(/[\\/]+/).filter(Boolean);
+  const filename = parts[parts.length - 1];
+  return filename ? `[local path hidden: ${filename}]` : "[local path hidden]";
+}
+
+function sanitizeAuditObject(value: Record<string, unknown>): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string") {
+      sanitized[key] = auditChangeValueSummary(key, item);
+    } else if (Array.isArray(item)) {
+      sanitized[key] = item.map((entry) =>
+        typeof entry === "object" && entry && !Array.isArray(entry)
+          ? sanitizeAuditObject(entry as Record<string, unknown>)
+          : entry,
+      );
+    } else if (typeof item === "object" && item) {
+      sanitized[key] = sanitizeAuditObject(item as Record<string, unknown>);
+    } else {
+      sanitized[key] = item;
+    }
+  }
+  return sanitized;
+}
+
+function looksLikeLocalPathKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return normalized.includes("path") || normalized.endsWith("_dir") || normalized.includes("directory");
+}
+
+function looksLikeLocalPath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\") || /^\/(?:Users|home|var|tmp|mnt)\//.test(value);
 }
 
 function normalizeAIProvider(value?: string | null): "openai" | "deepseek" | null {

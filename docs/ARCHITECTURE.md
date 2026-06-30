@@ -52,7 +52,9 @@ The optional configured direct AI endpoint is labeled experimental/text-context-
 
 ## Package Restore Safety
 
-Project package export writes a manifest with file references and checksums where practical. The package payload strips local absolute source/image/export paths from `project.json`; restore copies package files into the new project directory and rebuilds local paths from the manifest. The import preview validates zip structure, schema, JSON shape, safe paths, allowed file extensions, size/file-count limits, source PDF readability, sheet image readability, and checksum mismatches before DB/file restore begins. If confirmed restore fails after file copying starts, AutoQC removes newly-created restore files and project rows where practical.
+Project package export writes a manifest with file references and checksums where practical. The package payload strips local absolute source/image/export paths and sanitizes audit-event change details in `project.json`; restore copies package files into the new project directory and rebuilds local paths from the manifest. The import preview validates zip structure, schema, JSON shape, safe paths, allowed file extensions, upload/uncompressed size and file-count limits, source PDF readability, sheet image readability, and checksum mismatches before DB/file restore begins. If confirmed restore fails after file copying starts, AutoQC removes newly-created restore files and project rows where practical.
+
+Public project, export, package, and audit-event API responses redact local filesystem paths and provide controlled source/download URLs instead. Internal DB records retain managed paths where needed for file serving and cleanup.
 
 ## Storage
 

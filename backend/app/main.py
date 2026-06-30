@@ -5,6 +5,7 @@ import socket
 import sys
 import tempfile
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,6 @@ from backend.app.config import AI_PROVIDER_BASE_URLS, settings
 from backend.app.database import Database
 from backend.app.models import (
     BulkFindingUpdate,
-    ChecklistItemUpdate,
-    ChecklistSelectRequest,
     ExportRequest,
     FindingUpdate,
     ManualAIImportRequest,
@@ -29,7 +28,6 @@ from backend.app.models import (
 )
 from backend.app.sample_pdf import ensure_default_sample_pdf
 from backend.app.services.ai_review import AIReviewService, public_ai_import_batch
-from backend.app.services.checklists import ChecklistService
 from backend.app.services.exports import ExportService
 from backend.app.services.markup_memory import MEMORY_OUTCOMES, MarkupMemoryService
 from backend.app.services.placement_coordinates import (
@@ -41,7 +39,7 @@ from backend.app.services.placement_coordinates import (
     pdf_rect_to_display_rect,
 )
 from backend.app.services.pdf_processor import PDFProcessor
-from backend.app.services.project_packages import ProjectPackageService
+from backend.app.services.project_packages import MAX_PACKAGE_UNCOMPRESSED_BYTES, ProjectPackageService
 from backend.app.services.review_coverage import project_review_coverage_summary
 from backend.app.services.storage import safe_project_source_pdf_path, safe_public_data_asset_path
 
@@ -54,8 +52,9 @@ export_service = ExportService(db, settings.data_dir)
 ai_review_service = AIReviewService(db, settings)
 package_service = ProjectPackageService(db, settings.data_dir)
 memory_service = MarkupMemoryService(db)
-checklist_service = ChecklistService(db)
 logger = logging.getLogger(__name__)
+PDF_UPLOAD_CHUNK_BYTES = 1024 * 1024
+PACKAGE_UPLOAD_MAX_BYTES = MAX_PACKAGE_UNCOMPRESSED_BYTES
 
 app = FastAPI(
     title="Natural Gas Engineering Copilot",
@@ -99,10 +98,17 @@ async def create_project(
     project = db.create_project(name=name, project_type=project_type)
     if file is not None:
         try:
-            content = await file.read()
+            content = await _read_upload_bytes_limited(
+                file,
+                max_bytes=settings.max_upload_mb * 1024 * 1024,
+                label="PDF upload",
+            )
             processor.save_uploaded_pdf(project["id"], file.filename or "drawing_set.pdf", content)
             if auto_review:
                 processor.process_project(project["id"])
+        except HTTPException as exc:
+            db.update_project(project["id"], status="failed", summary=str(exc.detail))
+            raise
         except ValueError as exc:
             db.update_project(project["id"], status="failed", summary=str(exc))
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -180,7 +186,7 @@ def delete_project(project_id: str) -> dict[str, str]:
 def export_project_package(project_id: str, include_source_pdf: bool = True) -> dict[str, Any]:
     try:
         db.get_project(project_id)
-        return package_service.export_project_package(project_id, include_source_pdf=include_source_pdf)
+        return _public_project_package_export(package_service.export_project_package(project_id, include_source_pdf=include_source_pdf))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Project not found") from exc
     except ValueError as exc:
@@ -204,9 +210,12 @@ async def import_project_package(file: UploadFile = File(...)) -> dict[str, Any]
     suffix = Path(file.filename or "autoqc_project_package.zip").suffix.lower()
     if suffix != ".zip":
         raise HTTPException(status_code=400, detail="Import an AutoQC project package .zip file.")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as handle:
-        temp_path = Path(handle.name)
-        handle.write(await file.read())
+    temp_path = await _write_upload_to_temp_file_limited(
+        file,
+        suffix=".zip",
+        max_bytes=PACKAGE_UPLOAD_MAX_BYTES,
+        label="Project package upload",
+    )
     try:
         result = package_service.import_project_package(temp_path)
         result["project"] = _enrich_project(result["project"])
@@ -222,9 +231,12 @@ async def preview_project_package_import(file: UploadFile = File(...)) -> dict[s
     suffix = Path(file.filename or "autoqc_project_package.zip").suffix.lower()
     if suffix != ".zip":
         raise HTTPException(status_code=400, detail="Import an AutoQC project package .zip file.")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as handle:
-        temp_path = Path(handle.name)
-        handle.write(await file.read())
+    temp_path = await _write_upload_to_temp_file_limited(
+        file,
+        suffix=".zip",
+        max_bytes=PACKAGE_UPLOAD_MAX_BYTES,
+        label="Project package upload",
+    )
     try:
         preview = package_service.preview_project_package(temp_path)
         if not preview.get("valid"):
@@ -403,41 +415,6 @@ def preview_project_markup_memory_context(project_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Project not found") from exc
 
 
-@app.get("/checklists/templates")
-def list_checklist_templates() -> dict[str, Any]:
-    return {"templates": checklist_service.list_templates()}
-
-
-@app.get("/projects/{project_id}/checklist")
-def get_project_checklist(project_id: str) -> dict[str, Any]:
-    try:
-        db.get_project(project_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Project not found") from exc
-    checklist = checklist_service.get_project_checklist(project_id)
-    return checklist or {"project_id": project_id, "items": [], "progress": None}
-
-
-@app.post("/projects/{project_id}/checklist/select")
-def select_project_checklist(project_id: str, request: ChecklistSelectRequest) -> dict[str, Any]:
-    try:
-        db.get_project(project_id)
-        return checklist_service.select_checklist(project_id, request.checklist_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Project or checklist not found") from exc
-
-
-@app.patch("/projects/{project_id}/checklist/items/{item_id}")
-def update_project_checklist_item(project_id: str, item_id: str, update: ChecklistItemUpdate) -> dict[str, Any]:
-    try:
-        db.get_project(project_id)
-        return checklist_service.update_item(project_id, item_id, update.model_dump(exclude_unset=True))
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Project or checklist item not found") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @app.post("/projects/{project_id}/ai-review")
 def run_ai_review(project_id: str) -> dict[str, Any]:
     try:
@@ -575,7 +552,7 @@ def list_project_events(project_id: str) -> list[dict[str, Any]]:
         db.get_project(project_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Project not found") from exc
-    return db.list_finding_events(project_id)
+    return [_public_project_event(event) for event in db.list_finding_events(project_id)]
 
 
 @app.patch("/findings/bulk")
@@ -791,7 +768,7 @@ def export_project(
         "html": _data_url(export.get("html_path")),
     }
     return {
-        "export": export,
+        "export": _public_export_record(export),
         "files": files,
         "findings_exported": result["findings_exported"],
         "placement_summary": result.get("placement_summary"),
@@ -819,6 +796,7 @@ def _enrich_project(project: dict[str, Any]) -> dict[str, Any]:
     project["project_type"] = project.get("project_type") or "review"
     source = project.get("source_pdf_path")
     project["source_pdf_url"] = f"/projects/{project['id']}/source-pdf" if source else None
+    project["source_pdf_path"] = None
     try:
         findings = db.list_findings(project["id"], sources=["ai"])
     except Exception:
@@ -836,6 +814,93 @@ def _enrich_project(project: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         project["review_coverage"] = None
     return project
+
+
+def _public_export_record(export: dict[str, Any]) -> dict[str, Any]:
+    item = dict(export)
+    item["export_dir"] = None
+    for key in ["marked_pdf_path", "csv_path", "qa_report_path", "xlsx_path", "json_path", "summary_path", "html_path"]:
+        item[key] = _data_url(export.get(key))
+    return item
+
+
+def _public_project_package_export(result: dict[str, Any]) -> dict[str, Any]:
+    item = dict(result)
+    item["path"] = None
+    return item
+
+
+def _public_project_event(event: dict[str, Any]) -> dict[str, Any]:
+    item = dict(event)
+    if isinstance(item.get("changes"), dict):
+        item["changes"] = _sanitize_public_change_values(item["changes"])
+    return item
+
+
+def _sanitize_public_change_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(item, str) and (_looks_like_local_path_key(str(key)) or _looks_like_local_path(item)):
+                sanitized[key] = _redacted_path_label(item)
+            else:
+                sanitized[key] = _sanitize_public_change_values(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_public_change_values(item) for item in value]
+    return value
+
+
+def _looks_like_local_path_key(key: str) -> bool:
+    normalized = key.lower()
+    return normalized.endswith("_dir") or "path" in normalized or "directory" in normalized
+
+
+def _looks_like_local_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", value)) or value.startswith("\\\\") or bool(re.match(r"^/(Users|home|var|tmp|mnt)/", value))
+
+
+def _redacted_path_label(value: str) -> str:
+    parts = [part for part in re.split(r"[\\/]+", value) if part]
+    filename = parts[-1] if parts else ""
+    return f"[local path hidden: {filename}]" if filename else "[local path hidden]"
+
+
+async def _read_upload_bytes_limited(file: UploadFile, *, max_bytes: int, label: str) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(PDF_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail=f"{label} exceeds {max_bytes // (1024 * 1024)} MB limit.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _write_upload_to_temp_file_limited(file: UploadFile, *, suffix: str, max_bytes: int, label: str) -> Path:
+    handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    temp_path = Path(handle.name)
+    try:
+        total = 0
+        while True:
+            chunk = await file.read(PDF_UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(status_code=413, detail=f"{label} exceeds {max_bytes // (1024 * 1024)} MB limit.")
+            handle.write(chunk)
+    except Exception:
+        handle.close()
+        temp_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if not handle.closed:
+            handle.close()
+    return temp_path
 
 
 def _enrich_sheet(sheet: dict[str, Any]) -> dict[str, Any]:

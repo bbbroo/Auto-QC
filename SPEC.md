@@ -5,9 +5,9 @@
 This document preserves the original build brief, including legacy deterministic reasoning language. The current AutoQC pilot boundary supersedes that early direction for user-facing findings:
 
 - AutoQC is an AI-imported-update workflow.
-- Upload/reprocess extracts sheets, page images, metadata, entities, OCR/text, checklist coverage, and prompt context, but it does not create reviewer-visible deterministic QC findings.
+- Upload/reprocess extracts sheets, page images, metadata, entities, OCR/text, review coverage, and prompt context, but it does not create reviewer-visible deterministic QC findings.
 - User-facing findings/comments come from imported AI update JSON, optional configured Direct AI Review when clearly labeled, or reviewer/manual edits to those AI findings.
-- Checklist tracking records coverage and links existing findings only; it does not generate findings.
+- Review coverage is tracked through imported AI `reviewed_pages` confirmations; no separate tracker workflow is part of the active product.
 - Direct AI Review is currently experimental/text-context-only unless upgraded to true PDF/image-capable review and must pass the same coverage/import gates.
 - Final export requires complete imported review coverage, accepted findings, signoff, and validation readiness.
 - Raw pasted AI responses are preserved server-side for audit, while normal UI/API batch summaries expose only safe trace metadata.
